@@ -238,10 +238,13 @@ class WarmCompressorSession:
         (non-reentrant) claim — used to hand the L2 consolidation task to the L1 compression
         instance so its warm KV-cache prefix is reused instead of spawning a fresh instance.
 
-        Reuses ``refine``'s exact safety guards: reset any TERMINATED state, then append-only
-        via ``_continue_reusable_system_agent_turn`` which only appends while we still own the
-        claim for ``self.rid`` and the instance is IDLE. Returns False (claim lost / not IDLE /
-        error) so the caller degrades to the fresh path; never raises.
+        Unlike ``refine`` (append-only, so a correction turn still sees the summary under
+        review), a NEW op must start clean: reset any TERMINATED state, trim the instance back
+        to its byte-identical ``[system]`` prefix via ``_reset_warm_instance_to_prefix`` (drops
+        the prior L1 task+summary residue), then append the new task via
+        ``_continue_reusable_system_agent_turn`` — which only appends while we still own the
+        claim for ``self.rid`` and the instance is IDLE. Returns False (ineligible head / claim
+        lost / not IDLE / error) so the caller degrades to the fresh path; never raises.
         """
         if self._released:
             return False
@@ -249,6 +252,16 @@ class WarmCompressorSession:
             from agent_cascade.compression.agent_invoker import (
                 _reset_terminated_compressor_for_retry)
             _reset_terminated_compressor_for_retry(self.agent_pool, self.instance, self.actual_name)
+            # BUG_0386 — the L1->L2 boundary. The instance still carries the prior L1 task +
+            # summary residue. Trim it back to the byte-identical [system] prefix BEFORE threading
+            # the new consolidation task so L2 starts clean. This is the only reuse path that skips
+            # re-acquiring the (non-reentrant) claim, so it bypasses the reset inside
+            # _acquire_reusable_system_agent — hence the explicit shared-helper call here. refine()
+            # deliberately stays append-only: the summary under review must survive into corrections.
+            if not self.engine._reset_warm_instance_to_prefix(self.instance, self.caller_name):
+                logger.info('[COMPRESSOR_REUSE] begin_task: %s ineligible head — degrading to fresh',
+                            self.actual_name)
+                return False
             return self.engine._continue_reusable_system_agent_turn(
                 self.instance, task, caller, rid=self.rid) is not None
         except Exception as e:  # noqa: BLE001 — best-effort; caller degrades to the fresh path

@@ -212,6 +212,137 @@ class TestBeginTask:
         assert ok is False
         engine._continue_reusable_system_agent_turn.assert_not_called()
 
+    # ── BUG_0386: L1->L2 warm-instance context-clear (real AgentInstance, real helper) ────────
+    @staticmethod
+    def _shim_engine():
+        """Minimal engine exposing the REAL _reset_warm_instance_to_prefix (inherited from
+        SystemAgentMixin) so begin_task's L1->L2 reset is exercised for real, not mocked.
+        lifecycle is mocked because _prepare_instance_for_reuse only re-points ownership; every
+        reset semantic we assert (trim / identity / freeze / DELTA) lives in the helper itself.
+        _continue_reusable_system_agent_turn is a real append so we can observe the post-thread
+        conversation shape end-to-end."""
+        from agent_cascade.engine.system_agent import SystemAgentMixin
+        from agent_cascade.llm.schema import Message, USER
+
+        class _ShimEngine(SystemAgentMixin):
+            def __init__(self):
+                self.lifecycle = MagicMock()
+
+            def _continue_reusable_system_agent_turn(self, inst, task, caller, rid=''):
+                msg = Message(role=USER, content=task)
+                inst.append_message(msg)
+                return msg   # success is non-None; append_message() itself returns None
+
+        return _ShimEngine()
+
+    def test_reset_helper_trims_to_clean_prefix_and_preserves_identity(self):
+        # (a-unit) The helper drops prior L1 residue, keeps conversation[0] as the SAME object
+        # (KV prefix win), restores the freeze, and clears the stale per-run state it owns.
+        from agent_cascade.llm.schema import Message, USER
+        warm = _warm_compressor()
+        sys = warm.conversation[0]
+        warm.append_message(Message(role=USER, content='PRIOR L1 TASK'))
+        warm.append_message(Message(role='assistant', content='PRIOR L1 SUMMARY'))
+        warm._state_label = 'compressor'           # stale label -> KV bust if not cleared (R5)
+        warm.compression_summary = 'old summary'
+        warm.max_turns = 42
+        eng = self._shim_engine()
+
+        assert eng._reset_warm_instance_to_prefix(warm, 'Caller') is True
+        # The _prepare-delegated fields (auto-skill/_tg_*/_streaming) are intentionally NOT
+        # asserted here: lifecycle is mocked (they are _prepare_instance_for_reuse's contract,
+        # unchanged and covered by test_compressor_instance_reuse.py), not this helper's.
+        assert list(warm.conversation) == [sys]
+        assert warm.conversation[0] is sys         # identity preserved
+        assert warm._system_prompt_frozen is True
+        assert warm._state_label is None
+        assert warm.compression_summary is None
+        assert warm.max_turns is None              # invoke_consolidation_agent re-applies later
+        eng.lifecycle._prepare_instance_for_reuse.assert_called_once_with(warm, 'Caller', nest_depth=0)
+
+    def test_begin_task_clears_l1_residue_before_appending_l2(self):
+        # (a-integration) The core fix: threading L2 on the same warm instance must trim the L1
+        # task+summary first, so the consolidation sees a clean [system] + new task only.
+        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.compression import agent_invoker as _inv
+        warm = _warm_compressor()
+        sys = warm.conversation[0]
+        warm.append_message(Message(role=USER, content='PRIOR L1 TASK'))
+        warm.append_message(Message(role='assistant', content='PRIOR L1 SUMMARY'))
+        rid = 'bt_rid'
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+        engine = self._shim_engine()
+        session = compressor_reuse.WarmCompressorSession(
+            warm, COMPRESSOR_WARM_NAME, rid, engine, _fake_pool(warm), 'Caller')
+        with patch.object(_inv, '_reset_terminated_compressor_for_retry'):
+            ok = session.begin_task('CONSOLIDATE L2', 'Target')
+        assert ok is True
+        # Exactly [system, consolidation_task] — the L1 task + summary are gone.
+        assert list(warm.conversation) == [sys, warm.conversation[-1]]
+        assert len(warm.conversation) == 2
+        assert warm.conversation[-1].content == 'CONSOLIDATE L2'
+        joined = ' '.join(m.content for m in warm.conversation)
+        assert 'PRIOR L1 TASK' not in joined and 'PRIOR L1 SUMMARY' not in joined
+        assert warm.conversation[0] is sys
+        assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) == rid  # begin_task never releases
+
+    def test_refine_stays_append_only_and_keeps_summary_under_review(self):
+        # (b) L2 review-retry corrections must NOT reset: the summary under review survives into
+        # the correction turn. _reset_warm_instance_to_prefix must never fire on refine.
+        from agent_cascade.llm.schema import Message, USER
+        from agent_cascade.compression import agent_invoker as _inv
+        warm = _warm_compressor()
+        warm.append_message(Message(role=USER, content='L2 TASK'))
+        warm.append_message(Message(role='assistant', content='SUMMARY UNDER REVIEW'))
+        rid = 'rf_rid'
+        assert compressor_reuse.try_claim(COMPRESSOR_WARM_NAME, rid)
+        engine = MagicMock()  # not the shim: refine must not touch the reset helper
+
+        def _append(inst, task, caller, rid=''):
+            msg = Message(role=USER, content=task)
+            inst.append_message(msg)
+            return msg   # success is non-None; append_message() itself returns None
+        engine._continue_reusable_system_agent_turn.side_effect = _append
+        engine._reset_warm_instance_to_prefix = MagicMock()  # spy — must stay uncalled
+        session = compressor_reuse.WarmCompressorSession(
+            warm, COMPRESSOR_WARM_NAME, rid, engine, _fake_pool(warm), 'Caller')
+        with patch.object(_inv, '_reset_terminated_compressor_for_retry'), \
+                patch.object(_inv, '_execute_compressor_and_extract_summary',
+                             return_value=('REFINED SUMMARY', 'cap')):
+            out = session.refine(['keep me'])
+        assert out == ('REFINED SUMMARY', 'cap')
+        engine._reset_warm_instance_to_prefix.assert_not_called()
+        engine._continue_reusable_system_agent_turn.assert_called_once()
+        joined = ' '.join(m.content for m in warm.conversation)
+        assert 'SUMMARY UNDER REVIEW' in joined        # correction saw the carried context
+        assert len(warm.conversation) == 4             # append-only: system + task + summary + correction
+
+    def test_reset_helper_is_idempotent_and_byte_identical(self):
+        # (c) Two calls on an already-clean instance are a safe no-op and keep conversation[0]
+        # byte-identical (same object + same serialized content).
+        warm = _warm_compressor()
+        sys = warm.conversation[0]
+        before = sys.content
+        eng = self._shim_engine()
+        assert eng._reset_warm_instance_to_prefix(warm, 'Caller') is True
+        assert eng._reset_warm_instance_to_prefix(warm, 'Caller') is True   # idempotent, no-op
+        assert warm.conversation[0] is sys
+        assert warm.conversation[0].content == before  # byte-identical prefix
+        assert warm._system_prompt_frozen is True
+        assert list(warm.conversation) == [sys]
+
+    def test_reset_helper_rejects_ineligible_head(self):
+        # Guard contract: empty conversation or a non-SYSTEM head returns False (no mutation),
+        # which is what makes begin_task degrade to the fresh path.
+        eng = self._shim_engine()
+        from agent_cascade.llm.schema import Message, USER
+        inst = _warm_compressor()
+        inst.reset_conversation()                       # empty head -> ineligible
+        assert eng._reset_warm_instance_to_prefix(inst, 'Caller') is False
+        inst2 = _warm_compressor()
+        inst2.conversation[0] = Message(role=USER, content='not system')
+        assert eng._reset_warm_instance_to_prefix(inst2, 'Caller') is False
+
     def test_transient_predicate_classifies_transient_reasons(self):
         # Sanity: the transient predicate used by the wait treats a reader-in-flight reason as
         # worth waiting on; guard against accidentally enumerating it as permanent.

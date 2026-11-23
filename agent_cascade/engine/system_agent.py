@@ -768,6 +768,78 @@ class SystemAgentMixin:
 
         return inst
 
+    def _reset_warm_instance_to_prefix(self, inst, caller: str) -> bool:
+        """Trim a reused warm system instance to its byte-identical system prefix and clear
+        per-run state, so the next task starts from a clean ``[system]`` conversation.
+
+        BUG_0386: extracted verbatim from the reuse-hit block of
+        ``_acquire_reusable_system_agent`` to become the SINGLE source of truth for
+        "trim a warm system instance to its stable prefix". It is now called by BOTH that
+        acquire reuse path AND ``WarmCompressorSession.begin_task`` — the L1→L2 boundary that
+        previously appended the L2 consolidation task on top of the prior L1 task+summary
+        residue. The acquire path's behavior is byte-for-byte unchanged by this extraction.
+
+        Keeps ``conversation[0]`` as the SAME Message object (the KV-cache prefix win) and
+        restores ``_system_prompt_frozen = True`` (``reset_conversation()`` clears it) so the
+        volatile run-identity sections of ``_setup_turn`` do not re-stamp the prefix.
+        Idempotent: calling it on an already-clean ``[system]`` instance returns the same
+        ``[system]`` unchanged and never raises. Returns False (no mutation) if the instance
+        has no conversation or its head is not SYSTEM (ineligible — the caller degrades).
+
+        Locking: acquires ``inst._compression_lock`` (RLock) so the trim + DELTA block is
+        atomic; it re-nests safely under an already-held compression lock (the acquire reuse
+        path acquires it non-blocking as gate 10 before calling here).
+
+        ``restricted_shell`` is deliberately NOT set here — it is an acquire/role-specific
+        field (set once on Security's acquire) that this reset never clears, so it persists
+        across reuse. The auto-skill block, ``_tg_*`` stream-push flags and
+        ``_streaming_responses`` are cleared by ``lifecycle._prepare_instance_for_reuse``
+        below and are intentionally NOT duplicated here (single source of truth).
+        """
+        conv = inst.conversation
+        if not conv or getattr(conv[0], 'role', None) != SYSTEM:
+            return False
+        # Hold the reference FIRST: reset_conversation() clears the list, so sys_msg must be
+        # captured before it. rebuild_conversation([sys_msg]) then re-sets conversation to
+        # [sys_msg] with the SAME Message object → byte-identical serialized prefix.
+        sys_msg = conv[0]
+        with inst._compression_lock:
+            # Bulk per-run reset (turn, tool warnings, cache notifications, memory-hint block,
+            # conversation.clear()). Its one side effect we must undo is
+            # _system_prompt_frozen=False, restored immediately below. RLock, so this nests
+            # safely under a compression lock the caller may already hold.
+            inst.reset_conversation()
+            inst.rebuild_conversation([sys_msg])
+            # THE one field reset_conversation() clears that must be restored: the freeze gates
+            # the VOLATILE sections of the _setup_turn M1 rewrite (session metadata / resources /
+            # trust boundary in _refresh_system_prompt), so conversation[0] is not re-stamped with
+            # volatile run-identity on a reused turn and the KV prefix is preserved. The identity
+            # rewrite still runs but is a no-op (reused instances had identity stamped at creation).
+            inst._system_prompt_frozen = True
+
+            # ── DELTA resets — fields reset_conversation() does NOT touch ──────────────────────
+            inst.compression_summary = None
+            inst.latest_marker_index = -1
+            inst.max_turns = None  # caller re-sets immediately after (SECURITY/COMPRESSOR_MAX_TURNS)
+            inst._generate_cfg_override = None  # caller re-sets immediately after (UI cfg)
+            inst._turn_consumed = False
+            inst._loop_rollback_count = 0
+            inst._compression_suspended_at = 0.0
+            inst._suppress_loop_detection_next_turn = False
+            inst.is_terminated = False
+            inst.sleeping_since = None
+            inst._continue_saved_msg = None
+            # CRITICAL (R5): a stale _state_label makes _setup_turn do a state/load that
+            # destroys the warm KV cache. Clear it + the endpoint config snapshot.
+            inst._state_label = None
+            inst._last_endpoint_config = None
+
+        # ── H3: child relationship + ownership re-pointing (shared with find_or_create) ────────
+        # This also clears the auto-skill block, the _tg_* stream-push flags and
+        # _streaming_responses, so those are intentionally NOT duplicated in the block above.
+        self.lifecycle._prepare_instance_for_reuse(inst, caller, nest_depth=0)
+        return True
+
     def _acquire_reusable_system_agent(self,
                                        agent_class: str,
                                        instance_name: str,
@@ -1005,72 +1077,16 @@ class SystemAgentMixin:
                 return _reject(ReuseRejectReason.COMPRESSION_LOCK_BUSY)
 
             try:
-                # ── Reset to [system] — keep conversation[0] as the SAME object (the cache win) ──
-                # Take the reference FIRST: reset_conversation() clears the list, so we must hold
-                # sys_msg before it. rebuild_conversation([sys_msg]) then re-sets conversation =
-                # [sys_msg] with the SAME Message object → byte-identical serialized prefix.
-                sys_msg = inst.conversation[0]
-                # H2: use reset_conversation() for the BULK of the per-run resets (turn, tool
-                # warnings, cache notifications, memory-hint block + conversation.clear()). Its only
-                # side effect we must undo is _system_prompt_frozen=False, which we re-set to True
-                # immediately after. _compression_lock is an RLock, so this nests safely under the
-                # non-blocking acquire we already hold.
-                inst.reset_conversation()
-                inst.rebuild_conversation([sys_msg])
-                # THE one field reset_conversation() clears that must be restored: freeze
-                # gates the VOLATILE sections of the _setup_turn M1 rewrite (the
-                # `if not sys_prompt_frozen:` block in _refresh_system_prompt — session
-                # metadata / resources / trust boundary), so conversation[0] is not
-                # re-stamped with volatile run-identity on a reused turn and the KV
-                # prefix is preserved. The identity rewrite (step 1, the
-                # `re.sub(..., "You are {inst_name}.", ...)` in _refresh_system_prompt)
-                # still runs but is a no-op here: reused instances had identity stamped
-                # at creation, so it already equals instance_name (BUG_0364/BUG_0372
-                # decouple).
-                inst._system_prompt_frozen = True
-
-                # ── DELTA resets — fields reset_conversation() does NOT touch (plan §7) ────────
-                inst.compression_summary = None
-                inst.latest_marker_index = -1
-                inst.max_turns = None  # caller re-sets immediately after (SECURITY_AGENT_MAX_TURNS)
-                inst._generate_cfg_override = None  # caller re-sets immediately after (UI cfg)
-                inst._turn_consumed = False
-                inst._loop_rollback_count = 0
-                inst._compression_suspended_at = 0.0
-                inst._suppress_loop_detection_next_turn = False
-                inst.is_terminated = False
-                inst.sleeping_since = None
-                inst._continue_saved_msg = None
-                # CRITICAL (R5): a stale _state_label makes _setup_turn do a state/load that
-                # destroys the warm KV cache. Clear it + the endpoint config snapshot.
-                inst._state_label = None
-                inst._last_endpoint_config = None
-                # Auto-skill per-run block (agent_instance.py:276-283).
-                inst._auto_skill_task_output = None
-                inst._auto_skill_source_task = None
-                inst._auto_skill_proposed = False
-                inst._auto_skill_dirty_stop = False
-                # Stream-push flags (agent_instance.py:290-292) — a reused instance must not carry
-                # its previous run's "already pushed" state forward.
-                inst._tg_first_pushed = False
-                inst._tg_final_pushed_phase = None
-                inst._tg_first_pushed_text = None
-                # Streaming partials (agent_instance.py:323) — reset_conversation() does NOT clear
-                # _streaming_responses, so a reused instance would otherwise serve its previous run's
-                # stale tail on the first frame. Cleared here (compression lock already held); it is
-                # repopulated from the first LLM yield of the new run. Mirrored in
-                # lifecycle_manager._prepare_instance_for_reuse so both reuse paths stay in lockstep.
-                inst._streaming_responses = []
-
-                # ── H3: child relationship + ownership re-pointing (shared with find_or_create) ──
-                # NOTE: _prepare_instance_for_reuse lives on the ENGINE's lifecycle manager
-                # (self.lifecycle, set in __init__), NOT on the pool — a real AgentPool has no
-                # `lifecycle` attribute. An earlier draft called self.pool.lifecycle here; the
-                # AttributeError was swallowed by this method's best-effort except below, so every
-                # check fell back to a fresh spawn while the reset above it had already run. Same
-                # bug class as the build_task_message call sites fixed in _create_and_run_agent
-                # and _create_system_agent.
-                self.lifecycle._prepare_instance_for_reuse(inst, caller, nest_depth=0)
+                # Single source of truth (BUG_0386): trim to the byte-identical [system] prefix and
+                # clear per-run state via the shared helper (extracted from this block). Gate 8
+                # already guaranteed a valid SYSTEM head before this lock was acquired; a False
+                # return means the head was lost in the narrow window between gate 8 and the
+                # non-blocking compression-lock acquire — conservatively reject (the original
+                # in-line code assumed a valid head here). The outer finally releases the claim.
+                if not self._reset_warm_instance_to_prefix(inst, caller):
+                    logger.debug('[SECURITY_REUSE] %s ineligible (gate=bad_conversation_head, rid=%s): '
+                                 'head lost during reset', instance_name, rid)
+                    return _reject(ReuseRejectReason.BAD_CONVERSATION_HEAD)
                 # acquire-specific (NOT in the shared helper): a reused Security instance must run
                 # its read-only shell checks without prompting. The lifecycle reuse branch does not
                 # set this, so it is applied here to preserve v1's acquire behaviour exactly.
