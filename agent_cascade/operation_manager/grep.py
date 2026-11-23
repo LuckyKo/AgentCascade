@@ -1832,14 +1832,15 @@ class GrepMixin:
                         # wrote the full output to a spillover file (path captured in
                         # _try_subprocess_grep). Skip truncate_with_spillover here — calling it
                         # would be a no-op on already-bounded text and risks re-writing the
-                        # spillover file with truncated content. Surface the captured path,
-                        # matching the format read_file / the Python fallback produce.
+                        # spillover file with truncated content. The header shows the truncation
+                        # stats only; the spillover path is surfaced in the end-of-body tail
+                        # marker below (BUG_0397: keep it out of the header).
                         if _sub_spill_rel:
                             summary += ' ' + format_truncation_notice(
                                 shown_lines=_sub_shown_lines,
                                 total_lines=_sub_total_lines,
                                 total_chars=_original_output_size,
-                                spill_path=_sub_spill_rel,
+                                spill_path=None,
                             )
                         else:
                             summary += ' [TRUNCATED]'

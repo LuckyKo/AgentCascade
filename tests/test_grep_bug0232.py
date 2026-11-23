@@ -69,7 +69,7 @@ def test_all_spilled_header_is_total_not_zero(tmp_path):
     assert 'Found 0' not in out, out
     # The (correct) notice still reports the line counts, and the pointer is in the body.
     assert 'showing 0 of 7 lines' in out, out
-    assert 'Full output saved to:' in out, out
+    assert 'read_logs/read_file on' in out, out  # BUG_0397: spillover pointer in tail marker only
     assert 'were larger than the inline budget' in out, out
 
     # Ticket verification: the header number equals the count_only total for the same
@@ -152,8 +152,8 @@ def test_timeout_all_spilled_reports_partial_count_not_too_broad(tmp_path):
     assert 'search INCOMPLETE' in out, out                  # lower-bound semantics
     assert 'TIMED OUT after 5s' in out, out
     assert 'showing 0 of 7 lines' in out, out               # all spilled (inline shows none)
-    assert 'Full output saved to:' in out, out              # BUG_0232 spillover notice
     assert 'were larger than the inline budget' in out, out  # BUG_0232 all-spilled headline
+    assert 'read_logs/read_file on' in out, out              # BUG_0397: spillover path in tail marker only
     assert 'Found 0' not in out, out
 
 
@@ -163,10 +163,26 @@ def test_all_spilled_writes_spillover_file(tmp_path):
     with _force_fast_path(), patch('subprocess.run', side_effect=_fake_run(_HUGE_EVENTS)):
         out = om.grep('x', '.', char_limit=200)
 
-    m = re.search(r'Full output saved to: (.*?)\]', out)
+    m = re.search(r'read_logs/read_file on (.*?), or re-run', out)
     assert m, out
     spill_path = tmp_path / m.group(1)
     assert spill_path.exists(), f"referenced spillover missing: {spill_path}"
     content = spill_path.read_text(encoding='utf-8')
     # The spillover holds the FULL (untruncated) output — every huge match is present.
     assert 'x' * 400 in content, content[:200]
+
+
+def test_spillover_path_in_tail_not_header(tmp_path):
+    """BUG_0397: the spillover path must appear only in the end-of-body tail marker,
+    not in the header (summary) line. The header shows truncation stats only."""
+    om = _make_om(tmp_path)
+    with _force_fast_path(), patch('subprocess.run', side_effect=_fake_run(_HUGE_EVENTS)):
+        out = om.grep('x', '.', char_limit=200)
+
+    # Split header (first line) from body.
+    header, _, body = out.partition('\n')
+    # The header must NOT contain the spillover path.
+    assert 'read the spillover file' not in header, f"spillover path leaked into header: {header}"
+    assert 'Full output saved to:' not in header, f"spillover path leaked into header: {header}"
+    # The tail marker MUST contain the spillover pointer.
+    assert 'read_logs/read_file on' in body, f"spillover pointer missing from tail: {body[-200:]}"
