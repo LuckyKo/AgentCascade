@@ -192,85 +192,66 @@ class _AfkPool:
         self._enqueue_calls.append((name, content))
 
 
-def _drive_one_admin_nudge(monkeypatch, pool):
-    """Build the app, stub the advisor to flip ``has_messages`` + fail (superseded), and poll
-    until the (monkeypatched) ``relaunch_idle_agent`` is invoked — or the window elapses.
-    Returns (app, re_drives)."""
+def _drive_admin_dispatch(monkeypatch, pool):
+    """Build the app and drive one AFK-admin dispatch, capturing the enqueued content and any
+    relaunch_idle_agent call. Returns (enqueue_calls, relaunch_calls)."""
+    import json
     from agent_cascade import api_server
-    from agent_cascade.api_server import create_app
-    import agent_cascade.advisor_runner as _ar
     import agent_cascade.utils.wakeup_helpers as wh
-    from agent_cascade.advisor_runner import AdvisorResult
     from fastapi.testclient import TestClient
 
     monkeypatch.setattr(api_server, 'AFK_NUDGE_TICK_SECS', 0.02)
-    monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 0.05)
+    monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 1.0)  # one dispatch in the window
 
-    # Admin template available so _afk_admin_analysis reaches the (stubbed) advisor call.
-    pool.get_template = lambda name: (name == 'Admin')
-
-    def _advisor(*_a, **_k):
-        # Simulate the resume message arriving mid-advisor + the advisor being superseded.
-        pool._has_messages = True
-        return AdvisorResult(was_error=True, error_msg='superseded (gen 0 != 1)')
-
-    monkeypatch.setattr(_ar, 'run_lightweight_advisor', _advisor)
-
-    re_drives = []
+    relaunch_calls = []
     monkeypatch.setattr(
         wh, 'relaunch_idle_agent',
-        lambda p, n: (re_drives.append((p, n)), True)[1])
+        lambda p, n: (relaunch_calls.append((p, n)), False)[1])
 
-    app = create_app(agents=[], agent_pool=pool, config={'session_name': 'w1'})
-    with TestClient(app):
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and not re_drives:
-            time.sleep(0.02)
-    return app, re_drives
-
-
-def test_superseded_review_re_drives_idle_root(monkeypatch):
-    """Part B: when the Admin review is superseded (returns None) AND the root is IDLE with
-    pending text, the hand-off re-drives the root via relaunch_idle_agent — no basic-nudge
-    enqueue, so a superseded review never leaves the orchestrator idle-with-no-runner."""
-    pool = _AfkPool(afk_mode='admin')
-    _app, re_drives = _drive_one_admin_nudge(monkeypatch, pool)
-    assert re_drives, 'expected a re-drive of the IDLE root after a superseded review'
-    assert re_drives[0][1] == 'w1'
-    assert pool._enqueue_calls == []  # re-drive path does not enqueue a basic nudge
-
-
-def test_no_pending_text_keeps_basic_nudge_fallback(monkeypatch):
-    """Part B (safety): when the review is superseded but there is NO pending text (the ordinary
-    AFK case), the basic-nudge fallback is preserved and relaunch_idle_agent is NOT called."""
-    from agent_cascade import api_server
-    from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
-    import agent_cascade.utils.wakeup_helpers as wh
-
-    pool = _AfkPool(afk_mode='admin')
-    pool.get_template = lambda name: (name == 'Admin')
-
-    import agent_cascade.advisor_runner as _ar
-    from agent_cascade.advisor_runner import AdvisorResult
-    monkeypatch.setattr(_ar, 'run_lightweight_advisor',
-                        lambda *_a, **_k: AdvisorResult(was_error=True, error_msg='superseded'))
-    # has_messages stays False → the basic-nudge fallback path (no re-drive).
-
-    re_drives = []
-    monkeypatch.setattr(wh, 'relaunch_idle_agent',
-                        lambda p, n: (re_drives.append((p, n)), True)[1])
-
-    from fastapi.testclient import TestClient
-    monkeypatch.setattr(api_server, 'AFK_NUDGE_TICK_SECS', 0.02)
-    monkeypatch.setattr(api_server, 'AFK_NUDGE_COOLDOWN', 1.0)  # one nudge in the window
     app = api_server.create_app(agents=[], agent_pool=pool, config={'session_name': 'w1'})
     with TestClient(app):
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not pool._enqueue_calls:
             time.sleep(0.02)
+    return pool._enqueue_calls, relaunch_calls
 
-    assert pool._enqueue_calls and pool._enqueue_calls[0][1] == AFK_DEFAULT_MESSAGE
-    assert re_drives == []  # no pending text → no re-drive
+
+def _enqueue_text(content):
+    """Normalize the enqueued content to a haystack for substring checks."""
+    import json
+    return content if isinstance(content, str) else json.dumps(content)
+
+
+def test_admin_dispatch_delivers_trigger_text_with_pinned_identity(monkeypatch):
+    """BUG_0392 (v2, observable layer): with the Admin template available, the daemon enqueues
+    AFK-window TRIGGER text carrying the pinned call_agent identity (fixed name + class), and
+    does NOT call relaunch_idle_agent (the BUG_0359 re-drive branch was dropped — under v2 the
+    daemon drives the turn itself right after enqueue, so there is never a
+    'pending text, no runner' window)."""
+    pool = _AfkPool(afk_mode='admin')
+    pool.get_template = lambda name: (name == 'Admin')  # template available
+
+    calls, relaunch_calls = _drive_admin_dispatch(monkeypatch, pool)
+    assert calls, 'expected the daemon to enqueue the AFK trigger text'
+    text = _enqueue_text(calls[0][1])
+    assert "instance_name='AFK_Admin'" in text, 'pinned instance_name missing from trigger'
+    assert "agent_class='Admin'" in text, 'pinned agent_class missing from trigger'
+    assert relaunch_calls == [], 'relaunch_idle_agent must not be invoked under v2'
+
+
+def test_admin_template_unavailable_falls_back_to_basic_nudge(monkeypatch):
+    """BUG_0392 (v2, observable layer / build-time #2): when the Admin template is unavailable
+    the dispatch deterministically enqueues the basic nudge text (no LLM dependency, no retry
+    loop), and relaunch_idle_agent is never invoked."""
+    from agent_cascade.api_server import AFK_DEFAULT_MESSAGE
+
+    pool = _AfkPool(afk_mode='admin')
+    pool.get_template = lambda name: None  # Admin template missing
+
+    calls, relaunch_calls = _drive_admin_dispatch(monkeypatch, pool)
+    assert calls, 'expected a basic-nudge fallback enqueue when the Admin template is missing'
+    assert calls[0][1] == AFK_DEFAULT_MESSAGE
+    assert relaunch_calls == [], 'relaunch_idle_agent must not be invoked under v2'
 
 
 # ── Part D: boot-restore state normalization ──────────────────────────────────────────────

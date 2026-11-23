@@ -380,6 +380,14 @@ def run_child_core(
     # reflection-tail message (plan §3.3); non-auto-skill runs are unaffected.
     result = extract_instance_output(conv, instance_name, was_terminated=was_terminated, pool=pool, instance=inst)
 
+    # Cap an Admin oversight report: the read-only Admin returns a findings block for the
+    # caller's context, and an unbounded result would flood it as a single oversized tool
+    # message. Bounded at the same lever as the legacy enqueued nudge.
+    if agent_class.lower() == 'admin':
+        from agent_cascade.settings import AFK_ADMIN_NUDGE_MAX_CHARS
+        if result and len(result) > AFK_ADMIN_NUDGE_MAX_CHARS:
+            result = result[:AFK_ADMIN_NUDGE_MAX_CHARS] + '\n…[truncated — report exceeded the character cap]'
+
     # Detect if the child's only output is a system error or termination notice.
     # Check the RAW output BEFORE _format_result wraps it in "[Agent 'name' Completed]:".
     # Verified: llm_call.py produces "[SYSTEM ERROR: <msg>]" for every fatal/timeout path.

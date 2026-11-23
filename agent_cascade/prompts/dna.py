@@ -329,9 +329,10 @@ SKILL_ADVISOR_PROMPT = (
     'whenever a revised delegation could pass; otherwise write "none". Omit both lines on APPROVE.\n'
     'After your [VERDICT] line, append [END] on the same line to signal your response is complete. Do NOT make any further tool calls after [END].')
 
-# --- AFK Admin-mode nudge (api_server._afk_admin_analysis) ---
-# The whole final text is enqueued verbatim to the idle supervisor as the user message that
-# resumes its work — so it must be written FOR the supervisor, not for the user.
+# --- AFK Admin-mode nudge (api_server._afk_admin_trigger_text) ---
+# The Admin is a session-continuing call_agent child of the root; this prompt is its `task`.
+# The whole final text is returned to the root as the Admin sub-agent's call_agent tool result —
+# so it must be written FOR the supervisor, not for the user.
 # Placeholders: {root_name}, {log_path}, {last_step}, {telemetry_hint}, {max_findings}.
 AFK_ADMIN_PROMPT = (
     'You are the fleet overseer running an AFK-window review. The user is away; the '
@@ -343,6 +344,15 @@ AFK_ADMIN_PROMPT = (
     'Last completed step (from its live conversation): {last_step}\n'
     'Session telemetry: {telemetry_hint}\n\n'
     '## Analyze\n'
+    '0. Recall first (lossless memory layer): you are RE-INVOKED on a recurring AFK cadence — '
+    'your own earlier AFK-window turns are already in your context, and prior AFK-Admin session '
+    'logs are on disk. Before proposing anything, identify what you ALREADY dispatched to '
+    '{root_name} in earlier windows and cite the specific prior dispatch you are continuing '
+    'from. Do NOT re-issue work you already tasked (re-dispatching closed/duplicate work is the '
+    'failure this review exists to prevent) — advance, revise, or close prior instructions. If '
+    'your in-context history has been summarized and is ambiguous, fall back to scanning the '
+    'prior AFK-Admin session logs (list the workspace agent logs named for this Admin and read '
+    'them) as the lossless record, and cite them when deciding to skip already-done work.\n'
     '1. Read the log tail and the telemetry dump. Work from evidence; cite the log lines '
     'or telemetry rows behind every finding.\n'
     '2. Decide: is the assigned task complete, partially complete, stuck, or drifting away '
@@ -407,8 +417,10 @@ AFK_ADMIN_PROMPT = (
     'information) for a minor speed/cost gain, do NOT push it — escalate to the user.\n'
     '- Quality over speed: prefer the correct, well-verified change over the fast one.\n\n'
     '## Output contract (IMPORTANT)\n'
-    'Your ENTIRE final text is delivered verbatim to {root_name} as the user message that '
-    'continues its work. Structure it as:\n'
+    'Your ENTIRE final text is returned to {root_name} as a call_agent tool result. Begin with '
+    'a provenance header on the very first line — `[AFK-Admin review — supervisor: {root_name}]` '
+    '— so you stay identifiable as the fleet overseer (not a user turn) even after {root_name}\'s '
+    'own history is summarized. Then structure the rest as:\n'
     '   STATUS: <complete | partial | stuck | drifting> — one line of evidence\n'
     '   FINDINGS: <short numbered list, at most {max_findings}, or "none">, evidence-cited\n'
     '   TASK: <the single highest-priority, concrete instruction {root_name} should act '

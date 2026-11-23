@@ -142,6 +142,25 @@ DEFAULT_NEW_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset({
     '__all_mcp_tools__',  # Sentinel: block ALL MCP tools (e.g., memory-get, filesystem-read)
 })
 
+# Default disabled tools for the Admin oversight class (read-only enforcement).
+# The Admin role is read-only by soul ("watch, don't work") but declares no tool directive,
+# and the call_agent spawn path never sets restricted_shell (that flag is system-agent-spawn
+# only) — so an Admin child would otherwise inherit the caller's permissive toolset and could
+# edit files / run shell. This set is merged into a call_agent-spawned Admin child's disabled
+# tools at child init so the read-only guarantee is enforced at both the offered-schema and the
+# use-time denial gates. Host-exec and file-mutation tools are disabled; read tools, web
+# research and skill loading stay enabled (the AFK review needs them). Not env-backed on
+# purpose: this is a read-only security floor, not a user-tunable.
+ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS: frozenset[str] = frozenset({
+    'shell_cmd',          # Execute shell commands on host system
+    'code_interpreter',   # Run Python code in a sandboxed environment
+    'write_file',         # Create/overwrite files
+    'edit_file',          # Modify existing files
+    'delete_file',        # Delete files
+    'copy_file',          # Copy files/directories
+    're_indent',          # Re-indent file blocks (mutates files on disk)
+})
+
 # Tools kept ENABLED by default for dynamically loaded agents:
 # - call_agent, dismiss_agent — essential for agent coordination
 #   (list_agents is deprecated in favor of system_info help="agents")

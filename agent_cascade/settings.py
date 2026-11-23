@@ -136,9 +136,15 @@ AFK_ADMIN_MAX_TURNS: int = int(
 AFK_ADMIN_FIRST_YIELD_TIMEOUT: float = float(
     os.getenv('AGENT_CASCADE_AFK_ADMIN_FIRST_YIELD_TIMEOUT', 45.0))  # First-yield guard (s)
 AFK_ADMIN_NUDGE_MAX_CHARS: int = int(
-    os.getenv('AGENT_CASCADE_AFK_ADMIN_NUDGE_MAX_CHARS', 4000))  # Enqueued-nudge cap
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_NUDGE_MAX_CHARS', 4000))  # Admin result cap (chars)
 AFK_ADMIN_MAX_FINDINGS: int = int(
     os.getenv('AGENT_CASCADE_AFK_ADMIN_MAX_FINDINGS', 5))  # Max findings in the Admin prompt
+# Fixed instance_name of the session-continuing AFK Admin call_agent child. Re-called on every
+# AFK window so the child's session (and KV) persists across windows; the reaper provides the
+# fresh view once it goes idle past AGENT_IDLE_TIMEOUT. Must match the name the root passes in
+# its AFK trigger text — any drift on re-call is hard-rejected by the call_agent identity guard.
+AFK_ADMIN_INSTANCE_NAME: str = (
+    os.getenv('AGENT_CASCADE_AFK_ADMIN_INSTANCE_NAME') or 'AFK_Admin')
 
 # ── Security agent warm reuse ──────────────────────────────────────────────────
 # Reuse a single warm Security instance across security checks so the LLM prompt prefix

@@ -322,7 +322,7 @@ def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance
     if instance is None:
         return False  # instance dismissed mid-run — never resurrect it
     if getattr(pool, '_afk_admin_in_flight', False):
-        return False  # an Admin review is already running — do not stack nudges on it
+        return False  # an Admin trigger is already dispatched this window — do not stack dispatches
     if hasattr(pool, 'has_pending') and pool.has_pending(instance_name):
         return False
     if hasattr(pool, 'has_messages') and pool.has_messages(instance_name):
@@ -1539,68 +1539,21 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             with agent_pool._afk_nudge_lock:
                 agent_pool._afk_last_nudge_ts = 0.0   # release the claim so the next run-end retries
 
-    def _afk_admin_save_root_state(instance_name: str) -> bool:
-        """Persist the idle root's KV state before the Admin review runs (BUG_0198).
+    def _afk_admin_trigger_text(instance_name: str):
+        """Build the AFK-window trigger text the root receives as its next turn.
 
-        Security and Compressor save the caller's KV through
-        ``yield_caller_slot(..., save_fn=engine.save_before_slot_yield)`` because they run
-        inside a caller turn while it still holds its slot. The AFK Admin review instead
-        runs from a background daemon while the root is idle and slotless, so that seam
-        does not exist here. Saving now arms the consume-once ``_state_label``; the root's
-        next ``_setup_turn`` restores it after ``run()`` re-acquires the slot — the
-        eviction-safe path (the restore targets the endpoint actually held, never the
-        stale ``_last_endpoint_config``).
+        The daemon runs no LLM work: it hands the root trigger text, and the root's own turn
+        delegates to a fixed-name read-only Admin sub-agent via call_agent — so the review runs
+        in-turn and reuses that child's prior-window session. The Admin's root-state save is
+        handled by the call_agent parent-save path (this is a root turn holding its slot), so no
+        manual save is needed here.
 
-        Best-effort by design: a missed save degrades to the pre-fix behavior (the root
-        reprocesses its context) and must never block or fail the nudge. Gated exactly
-        like the automatic checkpoint path — the ``state_kv_save_enabled`` toggle ORed
-        with the safe-mode override (``state_ops.kv_save_effectively_enabled``) plus the
-        endpoint's own ``state_save_enabled`` capability flag.
-
-        Returns:
-            True if a label was saved (a restore is now pending), False otherwise.
+        Returns None only when the Admin template is unavailable, signalling the caller to fall
+        back to the basic nudge. Never raises.
         """
-        try:
-            inst = agent_pool.get_instance(instance_name) if agent_pool else None
-            if inst is None:
-                return False
-            from agent_cascade.state_ops import (is_state_save_capable,
-                                                 kv_save_effectively_enabled,
-                                                 save_instance_state)
-            from agent_cascade.engine.slot_lifecycle import _log_state_skip_once
-            settings = getattr(agent_pool, 'settings', None)
-            toggle = bool(getattr(settings, 'state_kv_save_enabled', False))
-            if not kv_save_effectively_enabled(inst, toggle):
-                _log_state_skip_once('afk-admin-save',
-                                     '[STATE_SAVE_SKIP] %s (afk-admin) — KV save disabled by toggle',
-                                     instance_name)
-                return False
-            if not is_state_save_capable(getattr(inst, '_last_endpoint_config', None)):
-                logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — endpoint not state-save capable',
-                             instance_name)
-                return False
-            # Lock around the save to match save_before_slot_yield / shell_cmd safe mode:
-            # makes the _last_endpoint_config read + _state_label write atomic against a
-            # concurrent turn. Safe because _state_lock is an RLock and save_instance_state
-            # re-acquires it.
-            with inst._state_lock:
-                return bool(save_instance_state(inst))
-        except Exception as e:
-            logger.debug('[STATE_SAVE_SKIP] %s (afk-admin) — save failed: %s', instance_name, e)
-            return False
-
-    def _afk_admin_analysis(instance_name: str):
-        """Run the read-only Admin agent over the idle session; return its text, or None.
-
-        ``None`` means fall back to the basic nudge: Admin template missing, advisor
-        timeout/error, or empty output. Never raises.
-        """
-        from agent_cascade.advisor_runner import run_lightweight_advisor
-        from agent_cascade.child_runner import _last_step_hint, _resolve_child_log_path
         from agent_cascade.prompts.dna import AFK_ADMIN_PROMPT
-        from agent_cascade.settings import (AFK_ADMIN_FIRST_YIELD_TIMEOUT, AFK_ADMIN_MAX_FINDINGS,
-                                           AFK_ADMIN_MAX_TURNS, AFK_ADMIN_NUDGE_MAX_CHARS)
-        from uuid import uuid4
+        from agent_cascade.settings import AFK_ADMIN_INSTANCE_NAME, AFK_ADMIN_MAX_FINDINGS
+        from agent_cascade.child_runner import _last_step_hint, _resolve_child_log_path
 
         get_template = getattr(agent_pool, 'get_template', None)
         if get_template is None or get_template('Admin') is None:
@@ -1609,7 +1562,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         log_path, _is_exact = _resolve_child_log_path(agent_pool, instance_name)
         inst = agent_pool.get_instance(instance_name)
         last_step = _last_step_hint(getattr(inst, 'conversation', None), instance_name)
-        task = AFK_ADMIN_PROMPT.format(
+        admin_task = AFK_ADMIN_PROMPT.format(
             root_name=instance_name,
             log_path=log_path,
             last_step=last_step or '(no completed step recorded)',
@@ -1617,77 +1570,57 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                             'raw JSONL is available via the /api/telemetry endpoint'),
             max_findings=AFK_ADMIN_MAX_FINDINGS,
         )
-        # BUG_0198: the Admin run shares the root's endpoint/model and can evict its
-        # resident KV pages, so persist the root's state first and leave the label
-        # pending for the next turn's restore. Best-effort — never blocks the review.
-        _afk_admin_save_root_state(instance_name)
-        result = run_lightweight_advisor(
-            pool=agent_pool,
-            agent_class='Admin',  # the advisor class name (NOT the mode value 'admin')
-            instance_name='Admin_afk_' + uuid4().hex[:8],
-            task=task,
-            caller=instance_name,
-            max_turns=AFK_ADMIN_MAX_TURNS,
-            first_yield_timeout=AFK_ADMIN_FIRST_YIELD_TIMEOUT,
-            generate_cfg=None,  # Admin keeps its own read-only baseline (fixed advisor toolset is Security-only)
+        # Hard fallback (no new completion-signal channel): the basic-nudge text is embedded
+        # verbatim so the root echoes it deterministically if the delegation fails, rather than
+        # synthesizing or losing it. The name/class are pinned so the re-call never trips the
+        # call_agent identity guard (N4).
+        basic_nudge = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
+        return (
+            f'Context: this is an AFK oversight window for "{instance_name}"; the user is away.\n\n'
+            f'## What to do\n'
+            f'Delegate this AFK-window review to your read-only fleet-oversight sub-agent, then '
+            f'act on its report. The sub-agent uses a FIXED identity so it keeps memory across '
+            f'AFK windows — pass this exact name and class:\n'
+            f"    call_agent(instance_name='{AFK_ADMIN_INSTANCE_NAME}', agent_class='Admin', "
+            f'task=<the review task below>)\n\n'
+            f'## Review task (pass it verbatim as `task`)\n'
+            f'{admin_task}\n\n'
+            f'## After the call\n'
+            f'The sub-agent returns a provenance-headed report (STATUS / FINDINGS / TASK). Act on '
+            f'the TASK line now. It may be continuing work it dispatched in an earlier AFK window '
+            f'(its prior turns are in its context) — advance it; do not restart closed work.\n\n'
+            f'## If the call fails (error / timeout / empty result)\n'
+            f'Do NOT retry the sub-agent and do NOT loop. Reply with EXACTLY this text instead:\n'
+            f'{basic_nudge}'
         )
-        if not result.ok:
-            logger.warning('[AFK-ADMIN] analysis failed for %s: %s', instance_name,
-                           result.error_msg or ('timeout' if result.was_timeout else 'error'))
-            return None
-        text = (result.output_text or '').strip()
-        if not text:
-            return None
-        if len(text) > AFK_ADMIN_NUDGE_MAX_CHARS:
-            text = text[:AFK_ADMIN_NUDGE_MAX_CHARS]
-        # Marker so this re-task survives context compression: the root recognizes the
-        # enqueued message as coming from the Admin (not a plain user turn) even after
-        # its own history has been summarized.
-        return 'Context: This is a message from Admin.\n\n' + text
 
     def _afk_admin_nudge(instance_name: str, loop) -> None:
-        """Daemon-thread worker for AFK admin mode: run the Admin analysis and enqueue its
-        result as the nudge (falling back to the basic nudge on any failure).
+        """Daemon-thread dispatcher for AFK admin mode: build the AFK-window trigger text and
+        enqueue it as the root's next turn. The root's own turn then delegates to the
+        session-continuing read-only Admin sub-agent via call_agent (falling back to the basic
+        nudge if the Admin template is unavailable).
 
-        Owns the _afk_admin_in_flight flag: set on entry, cleared in ``finally``. The cooldown
-        claim (taken by _afk_maybe_nudge) is released only if nothing was enqueued, so the next
-        tick / run-end can retry.
+        Owns the _afk_admin_in_flight flag (a dispatch debounce): set on entry, cleared in
+        ``finally``. The cooldown claim (taken by _afk_maybe_nudge) is released only if nothing
+        was enqueued, so the next tick / run-end can retry.
         """
         agent_pool._afk_admin_in_flight = True
         enqueued = False
         try:
-            om = getattr(agent_pool, 'operation_manager', None)
-            text = _afk_admin_analysis(instance_name)
+            text = _afk_admin_trigger_text(instance_name)
             if text is None:
-                # Admin unavailable / superseded / timed out / failed / empty.
+                # Admin template unavailable — deterministic basic-nudge fallback.
                 if agent_pool.get_instance(instance_name) is None:
-                    return  # instance dismissed while the analysis was running
-                # BUG_0359: a superseded/empty review must never leave the orchestrator
-                # IDLE with pending text and no runner. If the root is IDLE with
-                # unprocessed text, re-drive it via relaunch_idle_agent. That primitive's
-                # state gate is authoritative and SUPERSEDES the _is_generating flag
-                # precheck used by the basic-nudge path below: a stale `generating` flag
-                # over a truly-IDLE root is handled by the state gate, so no separate flag
-                # precheck is needed here (a live flag over a stale-IDLE read just loses
-                # the atomic IDLE->RUNNING race and spawns a wasted thread, never a
-                # double-run). IDLE-ONLY by design: if the root is genuinely
-                # RUNNING/COMPLETING (not just a stale flag), relaunch_idle_agent returns
-                # False and this path does NOT re-drive — that case defers to the live
-                # run, which drains the queue itself.
-                if agent_pool.has_messages(instance_name):
-                    from agent_cascade.utils.wakeup_helpers import relaunch_idle_agent
-                    if relaunch_idle_agent(agent_pool, instance_name):
-                        logger.debug(
-                            '[AFK-ADMIN] re-driving IDLE root %s after superseded/empty '
-                            'review (pending text, no runner)', instance_name)
-                    return
-                # No pending text: the ordinary AFK case — the basic nudge keeps AFK alive.
-                text = afk_idle_nudge_text(om)
-            # A real run may have started while the analysis was running; never interrupt it.
+                    return  # instance dismissed while building the trigger text
+                text = afk_idle_nudge_text(getattr(agent_pool, 'operation_manager', None))
+            # A real run may have started while the trigger text was being built; never interrupt it.
             if _is_generating(session):
                 return
             if agent_pool.get_instance(instance_name) is None:
-                return  # instance dismissed while the analysis was running
+                return  # instance dismissed while the trigger text was being built
+            # The daemon drives the turn itself right after enqueue, so there is no
+            # "pending text, no runner" window on this path (the dead relaunch primitive is
+            # gone; the enqueue-and-drive pattern below always leaves the root a live runner).
             agent_pool.enqueue_message(instance_name, _parse_multimodal_content(text))
             enqueued = True  # if _start_generation raises below the claim is KEPT (no double-enqueue),
                             # unlike the basic path which releases — deliberate asymmetry

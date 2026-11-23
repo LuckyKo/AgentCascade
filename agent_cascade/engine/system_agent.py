@@ -409,6 +409,21 @@ class SystemAgentMixin:
                                                       inst.agent_class,
                                                       from_external_load=session_was_loaded)
         self.lifecycle.propagate_settings(inst, caller, inst.agent_class, call_agent_args=args)
+        # Read-only oversight classes must never inherit write capability from the caller.
+        # restricted_shell is set only on the system-agent spawn path, never on call_agent;
+        # and propagate_settings always writes a (possibly empty) disabled_tools into the
+        # override, which suppresses the resolver's read-only baseline. Merge the Admin
+        # read-only set here so enforcement lands at BOTH the offered-schema and the use-time
+        # denial gates (Layer 1 of the resolver). This re-runs on every create AND reuse — so a
+        # warm, session-continuing AFK Admin stays read-only (initialize_conversation nulls the
+        # override, propagate_settings re-bakes it, and this merge follows).
+        if agent_class.lower() == 'admin':
+            from agent_cascade.constants import ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS
+            from agent_cascade.utils.disabled_tools import normalize_disabled_tools
+            cfg = getattr(inst, '_generate_cfg_override', None) or {}
+            cfg['disabled_tools'] = list(
+                normalize_disabled_tools(cfg.get('disabled_tools')) | ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS)
+            inst._generate_cfg_override = cfg
         self._boot_system_agent(inst, instance_name, agent_class, caller, conv,
                                 nest_depth=getattr(inst, '_nest_depth', 0))
         return conv
