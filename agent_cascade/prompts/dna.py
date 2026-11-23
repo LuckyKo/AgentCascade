@@ -426,9 +426,6 @@ AFK_ADMIN_PROMPT = (
     '- Choose it from the ladder above.\n'
     '- Even when everything is complete it must be a concrete next action (walk down to '
     'tier 7 free research) — never "stand by" / "nothing to do".\n'
-    'Marker hygiene: the literal markers [TASK] and [END] appear ONLY in that final block. '
-    'In your prose/analysis, call it "the TASK block" — never write [TASK]…[END] in your '
-    'reasoning (a stray literal would be misread as the task itself).\n'
     'Only the [TASK]…[END] block is posted to {root_name}; everything before it (your '
     'analysis, reasoning, findings) is not.\n'
 )
