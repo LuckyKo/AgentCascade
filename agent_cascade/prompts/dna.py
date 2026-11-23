@@ -1061,7 +1061,11 @@ TOOL_METADATA = {
                         'delivers them as media attachments; the browser/WS path shows them as plain text links.'),
         'parameters': {
             'destination':
-                ("Target of the message. Use 'user' to send to the human user, or an exact agent instance name (e.g., 'worker1') to send to another agent."),
+                ("Target of the message. 'user' means the HUMAN end-user (the person running Agent Cascade) — "
+                 'use it ONLY to reach the human, NEVER to reach the orchestrator/supervisor. To message your '
+                 'SUPERVISOR (the parent/orchestrator agent that delegated this task to you; its name appears in '
+                 "the \"Context: This is a message from {caller}.\" prefix of your task), pass that agent's exact instance "
+                 "name. To message a peer/sibling agent, pass its exact instance name (e.g., 'worker1')."),
             'message': 'The message content to send.'
         }
     },
