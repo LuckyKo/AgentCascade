@@ -878,6 +878,32 @@ def _edit_parse_range(range_str, total_lines: int) -> tuple:
         return zero_idx, zero_idx  # Empty range at position (insert point)
 
 
+def _di_span_summary(start_idx: int, end_idx: int, total_lines: int) -> str:
+    """Classify a delete_and_insert range as its ACTUAL delete span (BUG_0394).
+
+    The security advisor only ever sees the raw ``range_param`` string, which lets it
+    misread the documented EOF-append form ``'0'`` (and ``'0:'``) as a whole-file wipe.
+    The parsed 0-based delete span is already computed in-tree before the approval gate,
+    so this turns it into a deterministic, clamp-aware classification the advisor can
+    trust instead of a guess.
+
+    ``deleted = max(0, min(end_idx, total_lines) - start_idx)`` is the real slice length
+    ``len(file_lines[start_idx:end_idx])``. It is 0 for both ``'0'`` -> ``(total, total)``
+    and ``'0:'`` -> ``(total, total+1)`` (beyond-EOF start -> empty slice), and >= 1 for
+    any genuine deletion — including the BUG_0109 whole-file wipe (``':'`` / ``1:total``),
+    whose actual deleted count is >= total_lines. So ``deleted == 0`` can never mask a
+    destructive op; it provably describes edits that remove nothing.
+    """
+    # max(0, ...) is defensive for direct-call sites; for spans produced by
+    # _edit_parse_range the clamp keeps start_idx <= end_idx so it never floors.
+    deleted = max(0, min(end_idx, total_lines) - start_idx)
+    if deleted == 0:
+        return ('delete span EMPTY (0 lines deleted) — this is an append/insert-only '
+                f"edit at line {start_idx + 1} of {total_lines}; it removes NOTHING. "
+                "The range '0' (and '0:') is the documented EOF-append form.")
+    return f"delete span = lines {start_idx + 1}-{start_idx + deleted} ({deleted} lines deleted)"
+
+
 def _edit_detect_line_ending(line: str) -> str:
     """Detect the line ending style of a line."""
     if '\r\n' in line:
@@ -2926,7 +2952,16 @@ class FileOpsMixin:
                     f"old_content unchanged, changes nothing. To adjust blank lines use "
                     f"match_mode='exact' and include surrounding non-blank context in old_content.")
 
-        description = f"Surgical edit to: {path} (mode: {match_mode})"
+        # BUG_0394: for delete_and_insert the advisor only ever sees the raw range
+        # string, which invites a "wipes the whole file" misread of the EOF-append form
+        # ('0'). Enrich the (already free-form, advisor-read) description with the
+        # deterministic span classification computed pre-approval. Non-d&i modes are
+        # unchanged; this does NOT auto-approve — the LLM verdict is still required.
+        if match_mode == 'delete_and_insert':
+            description = (f"Surgical edit to: {path} (mode: {match_mode}) — "
+                           f"{_di_span_summary(start_idx, end_idx, total_lines)}")
+        else:
+            description = f"Surgical edit to: {path} (mode: {match_mode})"
 
         if pre_approved:
             # The grouped-batch executor already approved the whole group; the member's

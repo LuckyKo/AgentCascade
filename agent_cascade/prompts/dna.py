@@ -235,6 +235,16 @@ SECURITY_ADVISOR_PROMPT = (
     'counts) instead of shell counting (wc -l, find /c, grep -c). Even when harmless, a simple '
     'shell command that a cheaper tool covers promotes bad practice — auto-deny it.\n'
     '- Flag unnecessary shell usage.\n\n'
+    'edit_file guidance (when the tool is edit_file):\n'
+    '- If you reject, name ONLY real parameters (path, old_content, new_content, match_mode, '
+    'range, occurrence, justification) and ONLY valid match_mode values '
+    '(exact / heuristic / heuristic_agnostic / delete_and_insert). NEVER invent parameters or '
+    'modes such as "mode:", "append", or "range_param" — they do not exist and only mislead the caller.\n'
+    '- A delete_and_insert range whose description states "delete span EMPTY ... removes NOTHING" '
+    'inserts without deleting any line — it is the documented EOF append (range \'0\' or \'0:\'), NOT a '
+    'whole-file wipe; do not reject it as destructive. If an alternative is needed for an append at '
+    'end of file, use match_mode=\'exact\' with old_content = the verbatim last line, NOT a bare '
+    'range \'<last_line>\' (that inserts BEFORE that line, not at EOF).\n\n'
     '## Decision rulebook\n'
     '### Process\n'
     '1. Understand the requested operation.\n'
@@ -581,7 +591,7 @@ TOOL_METADATA = {
             'match_mode':
                 "Match mode for editing. Options: 'exact' (default, character-for-character match), 'heuristic' (Python-aware structure matching), 'heuristic_agnostic' (whitespace-only normalization), or 'delete_and_insert' (uses the `range` parameter to specify which lines to delete before inserting new_content verbatim — no anchor text is expected in new_content).",
             'range':
-                "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file. ':' (empty start AND end) deletes the ENTIRE file — that is NOT an append; to append use '0' or a single line number.",
+                "Required for delete_and_insert match_mode: A line range string specifying which lines to delete before inserting new_content (or use empty string for new_content to delete only). Format: 'start:end' (1-indexed, inclusive) e.g. '5:10' deletes lines 5-10; '5:' deletes from line 5 to end; ':10' deletes from start through line 10. IMPORTANT: A single number like '5' is INSERT-ONLY before that line — no deletion occurs. To delete a single line, use 'N:N' (e.g., '3:3'). Use '0' to append at end of file. ':' (empty start AND end) deletes the ENTIRE file — that is NOT an append; to append at EOF use '0' (or '0:'); a single line number inserts before that line, not at EOF.",
             'occurrence':
                 "Optional 1-based index selecting WHICH match to replace when the pattern is found multiple times in exact mode (e.g., occurrence=2 replaces only the 2nd match). Use -1 to replace ALL occurrences in the file. Only used with match_mode='exact'; ignored for other modes. When omitted, a non-unique pattern errors as before.",
             'justification':

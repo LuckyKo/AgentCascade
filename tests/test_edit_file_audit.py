@@ -405,3 +405,75 @@ def test_cancelled_absorption_is_not_reported():
         assert f.read_text(encoding='utf-8') == (
             'new line one\nnew line two\n   from 129 columns.\n'
             '   from 129 columns. So "micro 512" ...\n')
+
+
+# ── BUG_0394: delete_and_insert range '0' append is non-destructive and the
+#    approval description tells the security advisor so  ──────────────────────
+
+
+def _force_approval_capture(om):
+    """Force every edit onto the approval path and capture the ``description`` the
+    approver sees. Patches ``_is_auto_approved`` False and stubs
+    ``request_user_approval`` to record + approve. Mirrors
+    test_approval_toolargs_single_source.py::_capture, but keyed on ``description``
+    (which is where BUG_0394's fix lands)."""
+    captured = []
+
+    def _never_auto(*args, **kwargs):
+        return False
+
+    def _record_and_approve(*args, **kwargs):
+        captured.append(kwargs.get('description', ''))
+        return (True, 'approved by test spy')
+
+    om._is_auto_approved = _never_auto
+    om.request_user_approval = _record_and_approve
+    return captured
+
+
+def _line_endings(path):
+    text = path.read_text(encoding='utf-8')
+    return len(text.splitlines())
+
+
+def test_di_range0_append_succeeds_and_deletes_nothing():
+    """BUG_0394: a delete_and_insert append (range '0') on a >20-line file must
+    SUCCEED with a +N line delta and ZERO deleted lines, prior content byte-preserved.
+    This pins that _edit_parse_range yields an empty delete span and that the
+    BUG_0109 whole-file guard does NOT fire for range '0' — so the only thing that
+    used to block the append (the LLM advisor) is not an in-tree code error."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ''.join(f'line {i}\n' for i in range(1, 26))  # 25 lines, LF-terminated
+        f = _owned_file(om, d, 'doc.md', original)
+        orig_lines = _line_endings(f)
+        assert orig_lines == 25, orig_lines
+        appended = 'APPEND_A\nAPPEND_B\nAPPEND_C\n'  # N = 3 inserted lines
+        res = _d_and_i(om, f, new_content=appended, range_param='0')
+        assert res.startswith('OK'), f"EOF append must succeed, got: {res!r}"
+        # Byte preservation + exact delta: new bytes == original + appended, so the
+        # first 25 lines are intact (0 deleted) and exactly 3 were added.
+        assert f.read_text(encoding='utf-8') == original + appended, \
+            f"append must be original + inserted verbatim, got: {f.read_text(encoding='utf-8')!r}"
+        assert _line_endings(f) == orig_lines + 3, 'line delta must be exactly +3'
+
+
+def test_di_range0_description_tells_advisor_span_is_empty():
+    """BUG_0394 (the §b fix, LLM-free): for delete_and_insert + range '0' the
+    approval ``description`` must carry the empty-span classification (so the advisor
+    is told the op deletes nothing) and must NOT describe a whole-file replacement."""
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        original = ''.join(f'line {i}\n' for i in range(1, 26))
+        f = _owned_file(om, d, 'doc.md', original)
+        captured = _force_approval_capture(om)
+        res = _d_and_i(om, f, new_content='APPEND_A\n', range_param='0')
+        assert captured, 'delete_and_insert append must reach the approver'
+        desc = captured[0]
+        assert 'delete span EMPTY' in desc, f"description must flag empty span: {desc!r}"
+        assert 'removes NOTHING' in desc, f"description must state nothing removed: {desc!r}"
+        assert 'EOF-append' in desc, f"description must name the EOF-append form: {desc!r}"
+        # Must not read as a whole-file wipe (the advisor's BUG_0394 misread).
+        low = desc.lower()
+        for bad in ('entire file', 'whole file', 'delete and rewrite'):
+            assert bad not in low, f"description must not describe {bad!r}: {desc!r}"
