@@ -749,16 +749,26 @@ class ProposeSkill(BaseTool):
             # auto-fixed it, tell the agent it was repaired (no action needed); otherwise tell
             # it the YAML is malformed and how to fix it. Registration already succeeded —
             # this only surfaces in the success string (soft-gate pattern).
+            # Absolute path to the on-disk SKILL.md so a malformed frontmatter can be fixed
+            # with a quick in-place edit (no full re-proposal). Present for both NEW
+            # (production) and UPDATE (candidate/pending) registrations; empty if the
+            # metadata is unexpectedly absent (defensive — the null check above already
+            # guards the reachable path).
+            reg_meta = skill_manager.get_skill_metadata(proposed_name)
+            skill_file_path = reg_meta.get('file_path', '') if reg_meta else ''
             yaml_warn = ''
             if auto_fixed:
                 yaml_warn = (f"\n\n✅ YAML AUTO-FIXED: your frontmatter had a strict-YAML issue "
                              f"({strict_reason}). I re-quoted the offending value(s) so it now loads "
                              f"cleanly — no action needed.")
             elif not strict_ok:
+                path_line = (f"\nFile: {skill_file_path} — fix the quoting there directly "
+                             f"(no need to re-propose the whole skill)."
+                             if skill_file_path else '')
                 yaml_warn = (f"\n\n⚠️ YAML WARNING: your frontmatter did NOT parse under strict "
                              f"YAML ({strict_reason}). It was recovered via the tolerant fallback, but "
                              f"quote any value containing special characters (e.g. colons) as a single "
-                             f"double-quoted string to keep it clean.")
+                             f"double-quoted string to keep it clean.{path_line}")
             # The is_update branch returns above, so this generic line is only ever reached
             # for a NEW registration — 'registered' is the only reachable wording.
             if is_update:

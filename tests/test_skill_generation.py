@@ -2915,6 +2915,11 @@ class TestProposeSkillYamlStrictWarning:
         assert 'YAML WARNING' in result
         assert 'did NOT parse under strict' in result
         assert 'AUTO-FIXED' not in result, 'unfixable frontmatter must not claim to be auto-fixed'
+        # The warning must include the on-disk SKILL.md path so the defect can be fixed
+        # with a quick in-place edit (no full re-proposal of the whole skill).
+        expected_path = m.get_skill_metadata(name)['file_path']
+        assert expected_path, 'registered skill must have a non-empty on-disk file_path'
+        assert expected_path in result, 'YAML warning must include the on-disk SKILL.md path'
 
     def test_rating_only_path_unaffected(self, fresh_manager):
         """Rating-only mode must not invoke the strict probe (no content → no warning possible)."""
