@@ -246,6 +246,13 @@ class TelemetryCollector:
         # Guard against duplicate session_end events (BUG 8 fix)
         self._session_ended = False
 
+        # BUG_0400 (a): count real (non-checkpoint) events written since the last
+        # telemetry_stats checkpoint. When TELEMETRY_CHECKPOINT_EVENT_INTERVAL is
+        # crossed, _write_to_file emits a periodic checkpoint and resets this, bounding
+        # the aggregates lost to an unhandled hard-kill to at most one interval. Set
+        # before the file handle opens so the session_start header below is counted.
+        self.events_since_checkpoint = 0
+
         # Cross-process lock sidecar + append-mode handle, opened through the one
         # shared helper also used by attach_session. A continued keyed session
         # (file already present) reloads its last aggregate snapshot instead of
@@ -2402,6 +2409,7 @@ class TelemetryCollector:
         event.setdefault('prompt_hash', dna.PROMPT_HASH)
 
         line = json.dumps(event, ensure_ascii=False, default=str) + '\n'
+        pending_checkpoint = False
 
         try:
             with _telemetry_lock:
@@ -2420,6 +2428,21 @@ class TelemetryCollector:
                     fh.write(line)
                     fh.flush()
                     self._log_file = fh  # Update cached handle for future writes
+
+                # BUG_0400 (a): periodic checkpoint cadence. Bump the counter under the
+                # lock so it is atomic with the write, and count only real events (never
+                # the 'telemetry_stats' checkpoints themselves) so the cadence means
+                # "every N real events". The flag is raised here but write_checkpoint()
+                # is called BELOW, outside this lock region, so the aggregate lock is
+                # never held across the serialize+file-write (write_checkpoint re-enters
+                # this fn via _write_event -> _write_to_file, and _serialize_state
+                # re-acquires the RLock).
+                from agent_cascade import settings
+                interval = settings.TELEMETRY_CHECKPOINT_EVENT_INTERVAL
+                if interval > 0 and event.get('type') != 'telemetry_stats':
+                    self.events_since_checkpoint += 1
+                    if self.events_since_checkpoint >= interval:
+                        pending_checkpoint = True
         except Exception as e:
             if raise_on_error:
                 raise
@@ -2429,6 +2452,19 @@ class TelemetryCollector:
             # Increment under lock since this runs outside the main with block above (exception path)
             with _telemetry_lock:
                 self._session_stats['write_failures'] += 1
+
+        if pending_checkpoint:
+            # Reset BEFORE the write so the cadence restarts cleanly, and so the
+            # reentrant _write_to_file from this checkpoint (type 'telemetry_stats', also
+            # excluded above) cannot observe a saturated counter and schedule another —
+            # together with the telemetry_stats exclusion this is the recursion guard
+            # against checkpoint -> _write_event -> _write_to_file -> checkpoint.
+            # Best-effort: a failure is logged, never raised, matching write_checkpoint.
+            self.events_since_checkpoint = 0
+            try:
+                self.write_checkpoint()
+            except Exception as e:
+                _logger.warning('Periodic telemetry checkpoint failed: %s', e)
 
     def _write_critical_event(self, event: Dict):
         """Append an event to the JSONL log file; raise on I/O failure.

@@ -2368,3 +2368,115 @@ class TestSessionContinuity:
         c2 = TelemetryCollector(log_dir=d, instance_id='unit_test')
         assert c2.log_path == c.log_path  # reclaimed the stale lock, same keyed file
         c2.close()
+
+    # ── BUG_0400: periodic + final checkpoint on the restart / hard-kill paths ──
+
+    @staticmethod
+    def _telemetry_stats(path):
+        """Return every ``telemetry_stats`` record in *path*, parsed, in file order."""
+        out = []
+        for line in path.read_text(encoding='utf-8').splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get('type') == 'telemetry_stats':
+                out.append(rec)
+        return out
+
+    def test_restart_path_writes_final_checkpoint(self, tmp_path, monkeypatch):
+        """(c) The UI restart handler flushes a final checkpoint before re-exec.
+
+        Drives the real ``WsMessageHandler.handle_restart_server`` against a duck-typed
+        self whose ``agent_pool.telemetry`` is a real collector, with ``os.execl``
+        patched so the shared ``restart_server_process`` runs for real (invoking the
+        ``before_reexec`` hook) but the test process is never replaced. The last record
+        must be a ``telemetry_stats`` carrying the live aggregate total.
+        """
+        import asyncio
+        from unittest.mock import patch
+
+        from agent_cascade import server_restart
+        from agent_cascade.ws_handlers import WsMessageHandler
+
+        c = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        c._session_stats['total_llm_latency_ms'] = 12345.0  # stand-in for accumulated LLM time
+
+        class _Pool:
+            telemetry = c
+
+        class _Stub:  # duck-typed WsMessageHandler: only what handle_restart_server uses
+            agent_pool = _Pool()
+
+            async def broadcast_fn(self, payload):
+                pass
+
+        monkeypatch.setattr(settings, 'ENABLE_STACK_SWAP', False)  # skip the autosave-park branch
+        os.environ.pop('_AC_RESTART_IN_PROGRESS', None)
+        try:
+            with patch.object(server_restart.os, 'execl'), \
+                    patch.object(server_restart.os, '_exit'):
+                asyncio.run(WsMessageHandler.handle_restart_server(_Stub(), {}))
+            ckpts = self._telemetry_stats(c.log_path)
+            assert ckpts, 'restart path must write a telemetry_stats checkpoint'
+            assert ckpts[-1]['state']['_session_stats']['total_llm_latency_ms'] == 12345.0
+            last = json.loads(c.log_path.read_text(encoding='utf-8').splitlines()[-1])
+            assert last.get('type') == 'telemetry_stats'  # nothing written after the re-exec
+        finally:
+            os.environ.pop('_AC_RESTART_IN_PROGRESS', None)
+            c.close()
+
+    def test_periodic_checkpoint_cadence(self, tmp_path, monkeypatch):
+        """(a) A checkpoint is emitted every N events, and never on a partial tail."""
+        monkeypatch.setattr(settings, 'TELEMETRY_CHECKPOINT_EVENT_INTERVAL', 3)
+        c = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        c.events_since_checkpoint = 0  # ignore the init session_start header for cadence math
+        for _ in range(10):
+            c.record_auto_continue('w', 'x')
+        ckpts = self._telemetry_stats(c.log_path)
+        # Crossings at events 3, 6, 9 -> floor(10/3) == 3 checkpoints. Event 10 lands on a
+        # partial counter and must NOT emit a 4th ("no extra when the interval is not crossed").
+        assert len(ckpts) == 3
+        # The last checkpoint captured the state at event 9; event 10 is the bounded
+        # residual not yet checkpointed. In-memory shows 10, the last checkpoint shows 9.
+        assert c._session_stats['total_auto_continues'] == 10
+        assert ckpts[-1]['state']['_session_stats']['total_auto_continues'] == 9
+        assert c.events_since_checkpoint == 10 % 3
+        c.close()
+
+    def test_periodic_checkpoint_disabled_when_zero(self, tmp_path, monkeypatch):
+        """(a) Interval 0 disables the periodic checkpoint entirely (house 0-disables)."""
+        monkeypatch.setattr(settings, 'TELEMETRY_CHECKPOINT_EVENT_INTERVAL', 0)
+        c = TelemetryCollector(log_dir=str(tmp_path), instance_id='unit_test')
+        for _ in range(20):
+            c.record_auto_continue('w', 'x')
+        assert self._telemetry_stats(c.log_path) == []  # 0 disables -> no periodic records
+        assert c.events_since_checkpoint == 0           # counter never engages
+        c.close()
+
+    def test_boot_after_hard_kill_recovers_totals(self, tmp_path, monkeypatch):
+        """(a)+(c) acceptance proof: a hard-kill recovers up to, but not past, the
+        last periodic checkpoint (bounded loss < one interval)."""
+        self._enable_keyed(monkeypatch, 'stackA')
+        monkeypatch.setattr(settings, 'TELEMETRY_CHECKPOINT_EVENT_INTERVAL', 3)
+        d = str(tmp_path)
+        c1 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        c1.events_since_checkpoint = 0  # ignore init session_start for cadence math
+        for _ in range(3):              # crosses the interval -> exactly one checkpoint
+            c1.record_auto_continue('w', 'x')
+        snap = c1._serialize_state()    # in-memory state captured AT the last checkpoint
+        assert c1._session_stats['total_auto_continues'] == 3
+        assert len(self._telemetry_stats(c1.log_path)) == 1
+        # Hard-kill simulation: 2 more events (the residual lost on a kill, < interval)
+        # then drop the collector WITHOUT record_session_end() — close writes no checkpoint.
+        for _ in range(2):
+            c1.record_auto_continue('w', 'y')
+        assert c1._session_stats['total_auto_continues'] == 5
+        c1.close()
+
+        c2 = TelemetryCollector(log_dir=d, instance_id='unit_test')
+        # Restored ONLY from the last checkpoint -> total_auto_continues == 3 (not 5).
+        assert c2._session_stats['total_auto_continues'] == 3
+        assert dict(c2._session_stats['tool_calls_by_name']) == \
+            dict(snap['_session_stats']['tool_calls_by_name'])
+        c2.close()

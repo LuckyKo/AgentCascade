@@ -1411,7 +1411,14 @@ class WsMessageHandler:
                 await asyncio.to_thread(snapshot.snapshot_stack, self.agent_pool, trigger='restart')
             except Exception as e:
                 logger.warning('[STACK_SWAP] restart autosave failed (non-fatal): %s', e)
-        restart_server_process()
+        # BUG_0400 (c): os.execl replaces the process image (no SIGTERM/atexit/finally),
+        # so the graceful-shutdown telemetry checkpoint never fires on this path. Flush
+        # the live aggregates to a final checkpoint while they are still in RAM. Guarded
+        # so a missing pool can't block the restart; write_checkpoint is best-effort.
+        _telemetry = getattr(self.agent_pool, 'telemetry', None)
+        restart_server_process(
+            before_reexec=_telemetry.write_checkpoint if _telemetry is not None else None,
+        )
 
     async def handle_update_config(self, data: dict) -> None:
         """Handle 'update_config' — delegate to ConfigUpdateRouter for key dispatch.

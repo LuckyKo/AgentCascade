@@ -807,6 +807,12 @@ DEFAULT_RECENT_EVENT_COUNT: int = int(os.getenv('AGENT_CASCADE_DEFAULT_RECENT_EV
                                                 50))  # Default recent events count
 MAX_EVENTS_IN_MEMORY: int = int(os.getenv('AGENT_CASCADE_MAX_EVENTS_IN_MEMORY',
                                           5000))  # Max events in memory before trimming
+# Events between periodic telemetry_stats checkpoints (BUG_0400 (a)) — bounds the
+# aggregates lost to an unhandled hard-kill (SIGKILL/taskkill/OOM), where no graceful
+# shutdown or stack-park write can run. Counts written events, not wall-clock time.
+# Default 50; 0 disables the periodic checkpoint (graceful/park checkpoints still run).
+TELEMETRY_CHECKPOINT_EVENT_INTERVAL: int = int(os.getenv('AGENT_CASCADE_TELEMETRY_CHECKPOINT_EVENT_INTERVAL',
+                                                         50))  # Events per periodic telemetry checkpoint; 0 disables
 
 # Optional $-cost map for cache-waste telemetry (borrow-audit #7). Empty by default:
 # cache waste is always reported in tokens (provider-agnostic). Populate to ALSO

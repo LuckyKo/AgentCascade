@@ -99,6 +99,43 @@ def test_restart_sets_env_sentinel_before_execl(monkeypatch):
     assert seen['sentinel'] == '1', 'sentinel must be set before execl (child inherits it)'
 
 
+def test_restart_before_reexec_runs_before_execl():
+    """(c) The optional before_reexec hook is invoked exactly once, BEFORE os.execl.
+
+    A caller uses it to flush in-memory state (e.g. a telemetry checkpoint) that
+    os.execl would otherwise discard; assert the ordering (hook then execl) holds."""
+    from agent_cascade import server_restart
+
+    order = []
+
+    def _hook():
+        order.append('hook')
+
+    def _execl(*args, **kwargs):
+        order.append('execl')
+
+    with patch.object(server_restart.os, 'execl', side_effect=_execl), \
+         patch.object(server_restart.os, '_exit'):
+        server_restart.restart_server_process(before_reexec=_hook)
+
+    assert order == ['hook', 'execl'], 'before_reexec must run before the re-exec'
+
+
+def test_restart_before_reexec_failure_is_swallowed():
+    """(c) A raising before_reexec is logged and swallowed; the restart still proceeds."""
+    from agent_cascade import server_restart
+
+    def _boom():
+        raise RuntimeError('final-save failed')
+
+    with patch.object(server_restart.os, 'execl') as mock_execl, \
+         patch.object(server_restart.os, '_exit') as mock_exit:
+        server_restart.restart_server_process(before_reexec=_boom)  # must not raise
+
+    mock_execl.assert_called_once_with(sys.executable, sys.executable, *sys.argv)
+    mock_exit.assert_called_once_with(1)
+
+
 # ---------------------------------------------------------------------------
 # B. Port-race retry — _bind_socket_with_retry (hermetic, small budget)
 # ---------------------------------------------------------------------------

@@ -2154,7 +2154,14 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except Exception as e:
                 logger.warning('[STACK_SWAP] restart autosave failed (non-fatal): %s', e)
 
-        restart_server_process()
+        # BUG_0400 (c): os.execl replaces the process image (no SIGTERM/atexit/finally),
+        # so the graceful-shutdown telemetry checkpoint never fires here. Flush the live
+        # aggregates to a final checkpoint while they are still in RAM. Guarded so a
+        # missing pool can't block the restart; write_checkpoint is best-effort.
+        _telemetry = getattr(agent_pool, 'telemetry', None)
+        restart_server_process(
+            before_reexec=_telemetry.write_checkpoint if _telemetry is not None else None,
+        )
 
     @app.post('/api/auto_security')
     async def api_set_auto_security(token: str = None, data: dict = None):

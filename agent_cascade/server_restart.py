@@ -19,12 +19,19 @@ vs REST module-level ``broadcast``) and both send their notice BEFORE calling
 here. The helper is pure sync code with no async/app dependencies.
 """
 
+import logging
 import os
 import sys
-from typing import NoReturn
+from typing import Callable, NoReturn
 
 
-def restart_server_process() -> NoReturn:
+# Plain stdlib logger on purpose — this module's contract is "no app dependencies"
+# (see module docstring). The caller-injected ``before_reexec`` hook is logged here so a
+# failed final-save before the re-exec stays visible without importing the app logger.
+_logger = logging.getLogger(__name__)
+
+
+def restart_server_process(before_reexec: Callable[[], None] | None = None) -> NoReturn:
     """Re-launch the AC server in place via ``os.execl`` (same interpreter + argv + env).
 
     In-place re-exec on all platforms:
@@ -42,7 +49,20 @@ def restart_server_process() -> NoReturn:
     the NEW process can tell it came from a restart (env vars survive ``os.execl``;
     the startup hook pops it first thing, so a crash mid-notice can't leak it into
     a later boot).
+
+    ``before_reexec`` (optional): a zero-arg callable run on a best-effort basis
+    immediately BEFORE the sentinel + re-exec. Its one use is letting a caller flush
+    in-memory state (e.g. a telemetry checkpoint) that would otherwise be lost when
+    ``os.execl`` replaces the process image (no SIGTERM/atexit/finally runs there).
+    Exceptions are logged and swallowed — a failed hook must never block a requested
+    restart. Kept app-free by design: the hook is injected, never imported here.
     """
+    if before_reexec is not None:
+        try:
+            before_reexec()
+        except Exception as e:
+            _logger.warning('Pre-restart hook failed (non-fatal, restart continues): %s', e)
+
     os.environ['_AC_RESTART_IN_PROGRESS'] = '1'
     os.execl(sys.executable, sys.executable, *sys.argv)
     os._exit(1)

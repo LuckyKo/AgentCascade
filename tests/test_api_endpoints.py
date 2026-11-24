@@ -1536,6 +1536,27 @@ class TestAuthenticatedCommandEndpoints:
         mock_restart.assert_called_once()
         assert fake.stop_session_calls == 0  # restart must not stop agents
 
+    def test_restart_passes_telemetry_checkpoint_as_before_reexec(self, client):
+        """(c) BUG_0400: api_restart wires the live pool's telemetry checkpoint into the
+        shared helper's ``before_reexec`` hook so a final aggregate checkpoint lands
+        before ``os.execl`` (which replaces the process image and skips graceful shutdown)."""
+        from unittest.mock import patch
+
+        token = self._token(client)
+        pool = self._real_pool(client)
+        with patch('agent_cascade.server_restart.restart_server_process') as mock_restart:
+            resp = client.post('/api/restart', params={'token': token})
+
+        assert resp.status_code == 200
+        mock_restart.assert_called_once()
+        kwargs = mock_restart.call_args.kwargs
+        assert 'before_reexec' in kwargs, \
+            'api_restart must pass before_reexec to the shared restart helper'
+        # Wired to the live pool's telemetry checkpoint specifically, not an arbitrary callable.
+        tel = getattr(pool, 'telemetry', None)
+        expected = tel.write_checkpoint if tel is not None else None
+        assert kwargs['before_reexec'] == expected
+
     # ── /api/auto_security ──────────────────────────────────────────────────
 
     def test_auto_security_401_without_token(self, client):
