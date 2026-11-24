@@ -292,6 +292,45 @@ class AgentLifecycleManager:
         if old_parent is not None:
             self.pool._update_child_relationship(old_parent, inst.instance_name, add=False)
 
+        # BUG_0405: clear a reused TERMINATED instance's stale termination signal.
+        # find_or_create_instance explicitly permits reusing an instance whose state is IDLE OR
+        # TERMINATED (the AFK-Admin direct-run dispatch relies on this for session continuity). This fix
+        # lives in the shared _prepare_instance_for_reuse helper for consistency with its "both reuse
+        # paths cannot drift" contract. The other caller, ExecutionEngine._acquire_reusable_system_agent,
+        # already gates reuse on state==IDLE and rejects terminated instances, so a TERMINATED instance
+        # cannot reach it through that path — the reset there is a defensive no-op, not a separate live
+        # repro; the shared placement only prevents the gap from reappearing if a future caller loosens
+        # those gates. Without clearing the signal, a reused TERMINATED instance still reports
+        # pool.is_instance_terminated()==True, so the child's _stream_child_run bails at its very first
+        # line and returns an empty conversation ("agent creation returned no output"). The only other
+        # clear (find_or_create_instance's log_file branch) is gated on a log_file, which the AFK-Admin
+        # dispatch never supplies, so it is unreachable there.
+        # Mirrors _reset_terminated_compressor_for_retry (compression/agent_invoker.py): under
+        # _state_lock clear is_terminated and do TERMINATED->IDLE (a terminal state has no normal
+        # _transition() out, so set it directly), then under _pool_lock discard from terminated_instances
+        # — the predicate ORs both surfaces (pool/slots.py is_instance_terminated), so both must be
+        # cleared. Guarded on state==TERMINATED so an already-IDLE or live (RUNNING/SLEEPING/COMPLETING)
+        # instance is a strict no-op and a live instance is never clobbered. The guard keys on state alone
+        # (not the OR predicate), matching the proven sibling helper: terminate() transitions the flag, the
+        # pool set, and the state together, so a TERMINATED-state instance is exactly the case that carries
+        # all three stale markers; clearing unconditionally would risk erasing a concurrent terminate. Safe
+        # because no engine.run() is in flight at reuse time (we are between dispatches), the same
+        # precondition the compressor helper relies on; the L1 race guard still protects every race caller.
+        with inst._state_lock:
+            if inst.state == AgentState.TERMINATED:
+                inst.is_terminated = False
+                inst.state = AgentState.IDLE
+                was_terminated = True
+            else:
+                was_terminated = False
+        if was_terminated:
+            # _pool_lock taken alone (never nested inside a per-instance lock — Gotcha 3), matching the
+            # log_file-branch clear below. discard on an absent name is a no-op.
+            with self.pool._pool_lock:
+                self.pool.terminated_instances.discard(inst.instance_name)
+            logger.info(f"[INSTANCE REUSE] '{inst.instance_name}' cleared stale TERMINATED state "
+                        f"->IDLE before reuse (BUG_0405)")
+
     def find_or_create_instance(self,
                                 agent_class: str,
                                 instance_name: str,
