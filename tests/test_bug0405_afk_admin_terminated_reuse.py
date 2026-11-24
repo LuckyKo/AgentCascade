@@ -155,3 +155,51 @@ class TestTerminatedReuseClearsStaleTerminated:
         assert inst.state == AgentState.IDLE, \
             'BUG_0405: an already-IDLE instance must remain IDLE (no spurious transition)'
         assert pool.is_instance_terminated(name) is False
+
+
+class TestFreshCreateClearsStaleTerminatedSetEntry:
+    """The live AFK-Admin failure shape: a prior same-named instance was
+    terminated (name added to pool.terminated_instances) and then dismissed
+    (removed from pool.instances), leaving a STALE set entry. The next dispatch
+    creates a FRESH instance under that name. The fresh instance must not be
+    reported as terminated, or its child run loop bails before the first turn
+    and the dispatch reports 'agent creation returned no output'."""
+
+    def test_fresh_create_discards_stale_terminated_set_entry(self):
+        pool = AgentPool(DUMMY_LLM_CFG)
+        manager = AgentLifecycleManager(pool)
+        name = _unique('bug0405_fresh')
+
+        # Poison: a stale terminated_instances entry with NO live instance —
+        # exactly the AFK-Admin overnight state (terminated, then dismissed).
+        pool.terminated_instances.add(name)
+        assert name not in pool.instances, 'precondition: no live instance under this name'
+        assert pool.is_instance_terminated(name) is True, \
+            'precondition: the stale set entry must report terminated'
+
+        # Fresh-create dispatch shape (AFK-Admin: no live instance -> new instance).
+        result_inst, is_reuse, _ = manager.find_or_create_instance(
+            agent_class='Admin', instance_name=name, caller=None,
+            nest_depth=0, force_fresh=False)
+
+        assert is_reuse is False, 'no live instance, so a fresh one must be created'
+        assert result_inst is not None
+        assert result_inst is pool.instances.get(name), 'the fresh instance must be registered'
+        # The fix: the stale set entry must be discarded so the fresh instance runs.
+        assert name not in pool.terminated_instances, \
+            'BUG_0405: fresh-create must discard the stale terminated_instances entry'
+        assert pool.is_instance_terminated(name) is False, \
+            'BUG_0405: fresh instance must not be reported terminated (the bail trigger)'
+        assert result_inst.is_terminated is False
+        assert result_inst.state == AgentState.IDLE
+
+    def test_terminated_and_gone_still_detected_when_not_recreated(self):
+        """The clear must ONLY happen on recreation. A terminated name that is
+        NOT recreated (no find_or_create_instance call) must still be detected
+        as terminated — the 'terminated-and-gone' status signal is preserved."""
+        pool = AgentPool(DUMMY_LLM_CFG)
+        name = _unique('bug0405_gone')
+        pool.terminated_instances.add(name)
+        # No fresh-create call: the stale entry must persist (terminated-and-gone).
+        assert pool.is_instance_terminated(name) is True, \
+            'a terminated-and-gone name (not recreated) must stay detected as terminated'

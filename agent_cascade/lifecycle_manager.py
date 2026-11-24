@@ -427,6 +427,18 @@ class AgentLifecycleManager:
         # FIX
         if not is_reuse:
             self.pool.instances[instance_name] = inst
+            # A freshly-created instance is, by definition, not terminated. A prior
+            # same-named instance may have been terminated and then dismissed, leaving
+            # a stale entry in pool.terminated_instances (terminate_instance adds the
+            # name to the set even after the instance is gone, for "terminated-and-gone"
+            # status detection). is_instance_terminated() ORs that set with the instance
+            # flag, so the stale entry would report this fresh instance as terminated and
+            # its child run loop would bail before the first turn ("agent creation
+            # returned no output" — the AFK-Admin dispatch symptom). Clear it so the
+            # fresh instance runs. (Mirror of the reuse-path clear above; both reuse and
+            # fresh-create must drop a stale termination signal for the same name.)
+            with self.pool._pool_lock:
+                self.pool.terminated_instances.discard(instance_name)
             logger.debug('[CALL_AGENT_DEBUG] _create_and_run_agent — new instance registered in pool for %s',
                          instance_name)
 
