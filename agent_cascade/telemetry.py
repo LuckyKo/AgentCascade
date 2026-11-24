@@ -21,6 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from agent_cascade import settings
 from agent_cascade.cost import tokens_to_cost
 from agent_cascade.log import _AppLoggerProxy
 from agent_cascade.prompts import dna  # DNA_VERSION / PROMPT_HASH for the parallel DNA bin (BUG_0337)
@@ -2432,17 +2433,22 @@ class TelemetryCollector:
                 # BUG_0400 (a): periodic checkpoint cadence. Bump the counter under the
                 # lock so it is atomic with the write, and count only real events (never
                 # the 'telemetry_stats' checkpoints themselves) so the cadence means
-                # "every N real events". The flag is raised here but write_checkpoint()
-                # is called BELOW, outside this lock region, so the aggregate lock is
+                # "every N real events". When the interval is crossed we ALSO reset the
+                # counter under this same lock (atomic with the increment) so no concurrent
+                # event can observe a saturated counter and double-fire. write_checkpoint()
+                # itself is called BELOW, outside this lock region, so the aggregate lock is
                 # never held across the serialize+file-write (write_checkpoint re-enters
                 # this fn via _write_event -> _write_to_file, and _serialize_state
                 # re-acquires the RLock).
-                from agent_cascade import settings
                 interval = settings.TELEMETRY_CHECKPOINT_EVENT_INTERVAL
                 if interval > 0 and event.get('type') != 'telemetry_stats':
                     self.events_since_checkpoint += 1
                     if self.events_since_checkpoint >= interval:
                         pending_checkpoint = True
+                        # Reset atomically with the increment. The reentrant telemetry_stats
+                        # write from the pending checkpoint sees 0 (recursion guard half #1;
+                        # the telemetry_stats exclusion above is half #2).
+                        self.events_since_checkpoint = 0
         except Exception as e:
             if raise_on_error:
                 raise
@@ -2454,13 +2460,11 @@ class TelemetryCollector:
                 self._session_stats['write_failures'] += 1
 
         if pending_checkpoint:
-            # Reset BEFORE the write so the cadence restarts cleanly, and so the
-            # reentrant _write_to_file from this checkpoint (type 'telemetry_stats', also
-            # excluded above) cannot observe a saturated counter and schedule another —
-            # together with the telemetry_stats exclusion this is the recursion guard
-            # against checkpoint -> _write_event -> _write_to_file -> checkpoint.
-            # Best-effort: a failure is logged, never raised, matching write_checkpoint.
-            self.events_since_checkpoint = 0
+            # The counter was already reset under the lock at the crossing (see the write
+            # block above), so the reentrant telemetry_stats write from this checkpoint
+            # cannot re-schedule another. The trigger stays OUTSIDE the aggregate lock so
+            # it is never held across the serialize+file-write. Best-effort: a failure is
+            # logged, never raised, matching write_checkpoint.
             try:
                 self.write_checkpoint()
             except Exception as e:

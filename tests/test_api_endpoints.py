@@ -1539,23 +1539,33 @@ class TestAuthenticatedCommandEndpoints:
     def test_restart_passes_telemetry_checkpoint_as_before_reexec(self, client):
         """(c) BUG_0400: api_restart wires the live pool's telemetry checkpoint into the
         shared helper's ``before_reexec`` hook so a final aggregate checkpoint lands
-        before ``os.execl`` (which replaces the process image and skips graceful shutdown)."""
-        from unittest.mock import patch
+        before ``os.execl`` (which replaces the process image and skips graceful shutdown).
+
+        The module-scoped pool is built WITHOUT telemetry (its ``.telemetry`` is None), so
+        comparing both sides against None would pass vacuously. We install a non-None stub
+        collector so the assertion proves the actual checkpoint callable is carried — and it
+        fails if ``before_reexec`` were None."""
+        from unittest.mock import patch, MagicMock
 
         token = self._token(client)
         pool = self._real_pool(client)
-        with patch('agent_cascade.server_restart.restart_server_process') as mock_restart:
-            resp = client.post('/api/restart', params={'token': token})
+        original_telemetry = getattr(pool, 'telemetry', None)
+        pool.telemetry = MagicMock()  # non-None stub -> before_reexec must be a real callable
+        try:
+            with patch('agent_cascade.server_restart.restart_server_process') as mock_restart:
+                resp = client.post('/api/restart', params={'token': token})
 
-        assert resp.status_code == 200
-        mock_restart.assert_called_once()
-        kwargs = mock_restart.call_args.kwargs
-        assert 'before_reexec' in kwargs, \
-            'api_restart must pass before_reexec to the shared restart helper'
-        # Wired to the live pool's telemetry checkpoint specifically, not an arbitrary callable.
-        tel = getattr(pool, 'telemetry', None)
-        expected = tel.write_checkpoint if tel is not None else None
-        assert kwargs['before_reexec'] == expected
+            assert resp.status_code == 200
+            mock_restart.assert_called_once()
+            kwargs = mock_restart.call_args.kwargs
+            assert 'before_reexec' in kwargs, \
+                'api_restart must pass before_reexec to the shared restart helper'
+            # Must carry the stub's checkpoint callable specifically — not None and not some
+            # other object — otherwise the wiring assertion would be vacuous.
+            assert kwargs['before_reexec'] is not None
+            assert kwargs['before_reexec'] == pool.telemetry.write_checkpoint
+        finally:
+            pool.telemetry = original_telemetry  # module-scoped fixture: restore
 
     # ── /api/auto_security ──────────────────────────────────────────────────
 
