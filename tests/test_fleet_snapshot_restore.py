@@ -19,6 +19,7 @@ Covers the restore-side contract from plan §9:
 
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -319,13 +320,15 @@ def test_validate_envelope_integrity_raises_with_name_and_path(pool, tmp_path, m
     assert WORKER in msg and 'worker.jsonl' in msg
 
 
-def test_append_to_captured_log_is_tolerant_and_restores_prefix(pool, tmp_path, monkeypatch):
-    """BUG_0345: append-only growth of a captured log is now LEGAL. validate_log_reference
-    is append-tolerant (size >= offset with an intact captured prefix is valid), and
-    restore re-attaches EXACTLY the captured prefix — the appended turn is ignored.
+def test_append_to_captured_log_is_tolerant_and_replays_tail(pool, tmp_path, monkeypatch):
+    """BUG_0345 + BUG_0403: append-only growth of a captured log is now LEGAL, AND restore
+    REPLAYS the appended tail. validate_log_reference is append-tolerant (size >= offset with
+    an intact captured prefix is valid); the restored session must carry the live log's latest
+    count, not just the periodic-checkpoint prefix — the previously-ignored appended turn was
+    the BUG_0400(b)/BUG_0403 tail-loss defect.
 
-    (This replaced the S3 append-REFUSAL test, which asserted the old strict rule that any
-    post-capture growth was corruption. Truncation and missing-path refusals are kept.)"""
+    (Re-frames the S3 append-REFUSAL test, then the BUG_0345 "drop the append" test. Truncation
+    and missing-path refusals are unchanged.)"""
     make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
     _write_all(tmp_path, pool, count=4)
     env = capture_fleet_snapshot(pool)
@@ -343,9 +346,9 @@ def test_append_to_captured_log_is_tolerant_and_restores_prefix(pool, tmp_path, 
 
     _dismiss(pool)
     restore_fleet_snapshot(pool, env)
-    # Restore yields exactly the captured prefix; the appended turn is not re-attached.
-    assert len(pool.instances[WORKER].conversation) == captured_count
-    assert len(pool.instances[WORKER].conversation) < 5   # the appended line was dropped
+    # BUG_0403 tail-replay: the appended turn IS recovered, so the restored session carries
+    # the live count (checkpoint + tail), not just the captured prefix.
+    assert len(pool.instances[WORKER].conversation) == captured_count + 1
 
 
 def test_validate_refuses_same_size_rewritten_prefix(pool, tmp_path, monkeypatch):
@@ -582,3 +585,89 @@ def test_load_refuses_null_or_unknown_state(pool, tmp_path, monkeypatch):
         path.write_text(json.dumps(payload), encoding='utf-8')
         with pytest.raises(ValueError):
             load_snapshot_from_disk(path)
+
+
+# ── BUG_0403 boot-restart tail replay (direct _reattach_instance_log seam) ────
+
+def _make_tail_ref(tmp_path, *, base_count=4, tail_count=4, diverge=False):
+    """Build an origin log + snapshot ``log_ref`` whose offset is BELOW origin EOF.
+
+    ``base_count`` message lines are captured as the snapshot prefix (offset + hash), then
+    ``tail_count`` more lines are appended (append-only growth). Returns
+    ``(log_ref, origin_path, live_count)``. When ``diverge`` is set, the captured prefix is
+    rewritten in-place (same size) so its hash no longer matches — a compacted/corrupted log.
+    """
+    origin = tmp_path / 'tail_origin.jsonl'
+    write_jsonl(origin, ROOT, base_count)
+    log_ref = snapshot._capture_log_reference(str(origin))   # pins offset + prefix_sha256
+    with open(origin, 'a', encoding='utf-8') as fh:
+        for i in range(tail_count):
+            fh.write(json.dumps({'role': 'user' if i % 2 else 'assistant',
+                                 'content': f'tail {i}'}) + '\n')
+    if diverge:
+        off = int(log_ref['offset'])
+        raw = origin.read_bytes()
+        flipped = bytearray(raw)
+        j = raw.index(b'msg', 0, off)        # an ASCII byte strictly inside the hashed prefix
+        flipped[j] ^= 0x20                   # same size, different content -> hash mismatch
+        origin.write_bytes(bytes(flipped))
+    return log_ref, origin, base_count + tail_count
+
+
+def _reattach_direct(tmp_path, log_ref):
+    """Drive the REAL ``_reattach_instance_log`` against a bare instance double.
+
+    Returns ``(restored_count, instance, new_log_path)``. Mirrors
+    ``tests/test_stack_sessions_backend._instantiate_root``: a SimpleNamespace double has no
+    ``rebuild_conversation``, so wire a list-backed stub the re-attach path can call.
+    """
+    p = PoolDouble(log_dir=tmp_path)
+    inst = make_instance(ROOT, agent_class='orchestrator', cfg=None)
+    inst.conversation = []
+    inst.rebuild_conversation = lambda msgs: setattr(inst, 'conversation', list(msgs))
+    p.instances[inst.instance_name] = inst
+    count = p._reattach_instance_log(inst, log_ref, snapshot_id='s403')
+    new_path = Path(p._logger._loggers[(inst.instance_name, 'orchestrator')].log_path)
+    return count, inst, new_path
+
+
+def test_reattach_replays_tail_to_latest_count(tmp_path):
+    """BUG_0403 (a): a log grown past the snapshot offset (append-only growth) makes the
+    restored conversation AND the materialised copy carry the tail — the live count, not
+    just the periodic-checkpoint prefix. The provenance marker still lands after the tail.
+    """
+    log_ref, _origin, live_count = _make_tail_ref(tmp_path, base_count=4, tail_count=4)
+    assert snapshot.validate_log_reference(log_ref) is None   # append-growth is valid
+
+    count, inst, new_path = _reattach_direct(tmp_path, log_ref)
+    assert count == live_count == 8                            # restored count advanced to EOF
+    assert len(inst.conversation) == live_count
+    body = new_path.read_bytes()
+    assert b'tail 3' in body and b'"restored_from"' in body    # tail replayed, marker after it
+    # The materialised copy itself now reports the live message count.
+    assert snapshot._capture_log_reference(str(new_path))['message_count'] == live_count
+
+
+def test_reattach_raises_on_diverged_prefix_no_partial_replay(tmp_path):
+    """BUG_0403 (b) + BUG_0402 safety: a log whose captured prefix was rewritten (hash
+    mismatch) is refused by ``validate_log_reference``, so ``_reattach_instance_log`` raises
+    ``SnapshotIntegrityError`` BEFORE any materialisation — no partial tail replay, no new
+    logger. Upstream the envelope gate fails open to the legacy full-lineage loader.
+    """
+    log_ref, _origin, _live = _make_tail_ref(tmp_path, diverge=True)
+    snapshot._hash_cache.clear()          # force the sha256 re-hash path (fresh-process gate)
+
+    reason = snapshot.validate_log_reference(log_ref)
+    assert reason and 'hash mismatch' in reason, f"expected prefix-hash refusal, got {reason!r}"
+
+    p = PoolDouble(log_dir=tmp_path)
+    inst = make_instance(ROOT, agent_class='orchestrator', cfg=None)
+    inst.conversation = []
+    inst.rebuild_conversation = lambda msgs: setattr(inst, 'conversation', list(msgs))
+    p.instances[inst.instance_name] = inst
+
+    with pytest.raises(SnapshotIntegrityError):
+        p._reattach_instance_log(inst, log_ref, snapshot_id='s403')
+    # Refusal happens before mutation: the instance is untouched and no log was materialised.
+    assert inst.conversation == []
+    assert p._logger._loggers == {}

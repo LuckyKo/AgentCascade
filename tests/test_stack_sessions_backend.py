@@ -398,7 +398,9 @@ def test_save_does_not_touch_logs(tmp_path, monkeypatch):
 
 def test_snapshot_restores_after_further_turns(tmp_path):
     """save -> 5 more live turns appended -> validate_envelope_integrity still passes
-    and restore yields exactly the captured history."""
+    AND restore replays the appended tail (BUG_0403: the snapshot is only a periodic
+    checkpoint; the live log is the truth, so the restored session must carry the turns
+    written after the checkpoint, not just the captured prefix)."""
     env, log_path = _capture_env(tmp_path)
     captured_count = env.instances[ROOT].log['message_count']
     # Append-only growth (5 turns = 10 message lines).
@@ -408,8 +410,10 @@ def test_snapshot_restores_after_further_turns(tmp_path):
                                  'content': f'turn {i}'}) + '\n')
     # Append tolerance: growth after capture is NOT corruption.
     validate_envelope_integrity(env)
+    # BUG_0403 tail-replay: the 10 appended turns are recovered, so the restored
+    # conversation == checkpoint count + tail, not the checkpoint count alone.
     restored_count, _new, _origin = _reattach_into(tmp_path, env)
-    assert restored_count == captured_count
+    assert restored_count == captured_count + 10
 
 
 def test_restore_materialises_prefix_copy(tmp_path):
@@ -434,7 +438,14 @@ def test_restore_materialises_prefix_copy(tmp_path):
 
 
 def test_restore_older_snapshot_after_newer_restore(tmp_path):
-    """restore S1 then S2 of the same stack -> two distinct logs, neither desyncs."""
+    """restore S1 then S2 of the same stack -> two distinct logs, neither desyncs.
+
+    BUG_0403 tail-replay note: both restores read the SAME live origin, whose bytes now
+    extend past o1 (the 4 'later' turns). Restoring the OLDER snapshot S1 therefore replays
+    that tail and catches up to the live log's current message count, so c1 == c2. The two
+    logs are still distinct (different provenance snapshot_id) and each carries the intact
+    captured prefix. A deliberate rollback to strictly-older state must restore from an
+    archived origin copy, never the still-growing live log."""
     p, log_path = _single_root_pool(tmp_path)  # 4-message root log
     env1 = capture_fleet_snapshot(p, trigger='user', stack_id=ROOT)
     o1 = int(env1.instances[ROOT].log['offset'])
@@ -452,7 +463,9 @@ def test_restore_older_snapshot_after_newer_restore(tmp_path):
     assert new1 != new2
     assert new1.read_bytes()[:o1] == origin.read_bytes()[:o1]
     assert new2.read_bytes()[:o2] == origin.read_bytes()[:o2]
-    assert c1 < c2
+    # Both replays read the live origin past o1, so tail-replay extends the older restore
+    # to the live log's current EOF — the older count equals the newer one's.
+    assert c1 == c2
 
 
 def test_validate_refuses_truncated_log(tmp_path):

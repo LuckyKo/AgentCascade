@@ -900,13 +900,15 @@ class SessionIOMixin:
     def _reattach_instance_log(self, instance: AgentInstance, log_ref: dict,
                                *, mcp_block: Optional[dict] = None,
                                snapshot_id: Optional[str] = None) -> int:
-        """Materialise the captured prefix into a fresh log and re-attach (append-tolerant restore).
+        """Materialise the full referenced log into a fresh log and re-attach (append-tolerant restore).
 
         Unlike :meth:`load_session_from_log` this does NOT dismiss siblings or recreate
         the instance. It validates the snapshot's log reference (``validate_log_reference``),
-        materialises the captured prefix (up to offset) into a NEW log file (leaving the origin
-        untouched), writes a provenance event marker, parses the copy to rebuild the in-memory
-        conversation, and reopens the logger on the new path in append mode.
+        copies the full referenced log (origin, up to its current EOF) into a NEW log file
+        (leaving the origin untouched), writes a provenance event marker, parses the copy to
+        rebuild the in-memory conversation, and reopens the logger on the new path in append
+        mode. Because the copy runs to the origin's live EOF, a restore lands at the current
+        message count, not the checkpoint's.
 
         Raises :class:`SnapshotIntegrityError` if the referenced log diverged from
         the snapshot's recorded offset/hash. Returns the message count restored.
@@ -923,16 +925,20 @@ class SessionIOMixin:
         agent_class = agent_class.strip().lower()
         log_dir = str(self._logger.log_dir)
 
-        # Materialise captured prefix as a NEW log (never touch the origin)
+        # copy_session_file (shutil.copy2) already materialised the FULL current origin as a
+        # new log (never touching the origin). The legacy code truncated that copy to the
+        # checkpoint offset, silently dropping every event written after the last periodic
+        # checkpoint. We keep the full copy so a boot/crash restore lands at the live message
+        # count. NB: that makes a restore NOT point-in-time — a deliberate rollback to an older
+        # state must use an ARCHIVED origin copy, never the live log.
         new_path = AgentInstanceLogger.copy_session_file(origin, log_dir, agent_class,
                                                          instance.instance_name)
-        with open(new_path, 'r+b') as fh:
-            fh.truncate(int(log_ref['offset']))
+        offset = int(log_ref['offset'])
         with open(new_path, 'a', encoding='utf-8') as fh:
             fh.write(json.dumps({
                 'event': 'restored_from',
                 'path': origin,
-                'offset': log_ref['offset'],
+                'offset': offset,
                 'snapshot_id': snapshot_id,
                 'ts': time.time(),
             }) + '\n')
