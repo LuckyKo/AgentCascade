@@ -3382,16 +3382,81 @@ class TestActivityClock:
             lat = m._metrics['a'].get('last_activity_turn')
         assert lat == 10
 
-    def test_load_does_not_stamp_clock(self):
-        """D-ACT: a load must NOT reset the activity clock (only ratings do)."""
+    def test_load_stamps_last_activity_turn(self):
+        """BUG_0404 Phase 1: a DELIBERATE load (agent_selected=True) resets the activity clock to
+        the current global counter and stamps the usage-keyed ``last_load_turn``.
+
+        Replaces the old ``test_load_does_not_stamp_clock``. The auto-load case is covered by the
+        negative counterpart ``test_auto_load_does_not_stamp_clock``."""
         m = _rebalance_manager(self.tmp, ['a'])
         for _ in range(4):
             m.bump_activity_turn()
-        # No rating yet → last_activity_turn is None; a load leaves it unchanged.
-        m._increment_load_count('a', '1.0.0')
+        assert m._global_activity_turns == 4
+        m._increment_load_count('a', '1.0.0', agent_selected=True)
         with m._metrics_lock:
             lat = m._metrics['a'].get('last_activity_turn')
-        assert lat is None
+            llt = m._metrics['a'].get('last_load_turn')
+        assert lat == 4, 'a deliberate load must refresh last_activity_turn to the current turn'
+        assert llt == 4, 'a deliberate load must stamp last_load_turn to the current turn'
+
+    def test_load_keeps_unrated_skill_in_fair_window(self):
+        """BUG_0404 root cause (end-to-end): a heavily-loaded-but-never-rated skill must NOT age
+        into USELESS/eviction from the activity clock alone.
+
+        Seed an aged entry (``last_activity_turn=0``), advance the global clock past the fair
+        window, and confirm it classifies USELESS — that is the bug. A deliberate load then pulls
+        the clock back to the counter → activity-age 0 → PROTECTED again. Genuinely fails on
+        unfixed code: without the load stamp the clock stays at 0, so A stays past the window and
+        the unrated skill (q̂ == q0) is USELESS, never PROTECTED."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        with m._metrics_lock:
+            m._metrics['a'] = {'total_loads': 5, 'by_version': {'1.0.0': 5},
+                               'status': 'active', 'last_activity_turn': 0}
+        for _ in range(60):  # 60 > SKILL_FAIR_WINDOW_TURNS (50)
+            m.bump_activity_turn()
+
+        now = time.time()
+        with m._metrics_lock:
+            gt = m._global_activity_turns
+            aged = dict(m._metrics['a'])
+        aged_age = m._activity_age(aged, gt, now)
+        # The bug state, before the load: aged past the window, an unrated skill is USELESS.
+        assert aged_age >= 50
+        assert skill_classify(0, None, aged_age, fair_window_turns=50) == CLASS_USELESS
+
+        # The fix: a deliberate load refreshes the clock, bringing A back inside the window.
+        m._increment_load_count('a', '1.0.0', agent_selected=True)
+        with m._metrics_lock:
+            entry = dict(m._metrics['a'])
+        age = m._activity_age(entry, gt, now)
+        assert age == 0, 'load must reset activity-age to 0 (A = global_turns - last_activity_turn)'
+        cls = skill_classify(0, None, age, fair_window_turns=50)
+        assert cls == CLASS_PROTECTED, f'loaded skill must stay PROTECTED in its window, got {cls}'
+
+    def test_auto_load_does_not_stamp_clock(self):
+        """BUG_0404 Phase 1 (scope): an AUTO load (agent_selected=False) must NOT refresh the
+        activity clock. Only deliberate loads earn the fair-window refresh; auto-load-only skills
+        must keep aging to USELESS so the active set does not bloat.
+
+        Successor to ``test_load_does_not_stamp_clock``, correctly scoped. Seed a deliberate-load
+        stamp at turn 5, advance the clock to 10, then AUTO-load and confirm both stamps stay at 5
+        (not refreshed to 10). Fails if a load refreshes the clock unconditionally."""
+        m = _rebalance_manager(self.tmp, ['a'])
+        for _ in range(5):
+            m.bump_activity_turn()
+        m._increment_load_count('a', '1.0.0', agent_selected=True)   # deliberate → stamps at 5
+        with m._metrics_lock:
+            seeded_lat = m._metrics['a'].get('last_activity_turn')
+            seeded_llt = m._metrics['a'].get('last_load_turn')
+        assert seeded_lat == 5 and seeded_llt == 5, 'precondition: deliberate load must stamp both'
+        for _ in range(5):
+            m.bump_activity_turn()                                    # clock now 10
+        m._increment_load_count('a', '1.0.0', agent_selected=False)   # AUTO load
+        with m._metrics_lock:
+            lat = m._metrics['a'].get('last_activity_turn')
+            llt = m._metrics['a'].get('last_load_turn')
+        assert lat == 5, f'auto load must NOT refresh last_activity_turn (expected 5, got {lat!r})'
+        assert llt == 5, f'auto load must NOT refresh last_load_turn (expected 5, got {llt!r})'
 
     def test_age_idle_break_invariance(self):
         """Idle adds zero turns (A frozen); bumping advances A by exactly the bumped count."""

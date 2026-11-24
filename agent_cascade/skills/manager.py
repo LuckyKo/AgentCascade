@@ -174,7 +174,7 @@ def _default_metrics_entry(status: str = 'active') -> dict:
     ``_increment_load_count``) build a bare dict by hand and bypass this helper, so every
     reader of these fields must use ``.get(field, default)`` — never assume this shape."""
     return {'total_loads': 0, 'by_version': {}, 'status': status,
-            'last_activity_turn': None, 'hints': 0,
+            'last_activity_turn': None, 'last_load_turn': None, 'hints': 0,
             # BUG_0312 skill-evolution ledger (additive; no schema bump — readers use
             # .get(field, default)). promotions/discards = Gate B rating-gate outcomes
             # (evaluate_candidates), updates = candidate registered (SKILL.md rewrite /
@@ -1279,7 +1279,12 @@ class SkillManager:
         Thompson bandit (BUG_0356). Only the two deliberate entry points pass it: the
         ``load_skill`` tool and the caller-explicit ``call_agent(load_skill=[...])`` list.
         Harness auto-loads (init AUTO / advisor / basic keyword match / memory-hint) keep
-        the default False, so they bump ``total_loads`` only.
+        the default False, so they bump ``total_loads`` / ``last_used`` only.
+
+        BUG_0404 Phase 1: a deliberate load (``agent_selected=True``) additionally refreshes the
+        fair-window activity clock (``last_activity_turn`` / ``last_load_turn`` = current global
+        turn), mirroring ``_record_rating``. Auto-loads do NOT touch the clock — otherwise
+        auto-load-only skills never age to USELESS and the active set bloats.
 
         Flushes to disk when pending count reaches threshold OR 30 seconds have elapsed.
         """
@@ -1290,6 +1295,16 @@ class SkillManager:
                 # .get() so a legacy hand-built fresh-entry lacking the additive field
                 # still increments (BUG_0312 pattern — no schema bump / no migration).
                 entry['agent_selected_loads'] = entry.get('agent_selected_loads', 0) + 1
+                # BUG_0404 Phase 1 (root cause): a DELIBERATE load (load_skill tool /
+                # call_agent(load_skill=[...]) → agent_selected=True) is an applied use, so
+                # refresh this skill's fair-window clock to the current global counter
+                # (activity-age A → 0), mirroring _record_rating. Harness auto-loads
+                # (init-AUTO / advisor / keyword / memory-hint, agent_selected=False) do NOT
+                # reset it — they must keep aging to USELESS or auto-load-only skills never
+                # expire and the active set bloats. last_load_turn is the usage-keyed recency
+                # stamp read by the Phase 2 §2.4 eviction protection (only demand loads earn it).
+                entry['last_activity_turn'] = self._global_activity_turns
+                entry['last_load_turn'] = self._global_activity_turns
             entry['by_version'][version] = entry['by_version'].get(version, 0) + 1
             # Real "last used" supersedes any migration seed (schema 1.3). Multi-instance
             # last-writer-wins = most recently used; runs under _metrics_lock like the counters.
@@ -1380,8 +1395,10 @@ class SkillManager:
                 by_version_ratings[version] = vr
             entry['ratings'] = ratings
             # D-ACT: a rating is a deliberate applied use — reset this skill's activity clock to
-            # the current global counter (activity-age A → 0). Loads do NOT reset it. A brand-new
-            # skill has no rating until its first real one, so its first rating also seeds A≈0.
+            # the current global counter (activity-age A → 0). BUG_0404 Phase 1: deliberate loads
+            # now reset it too (see _increment_load_count), so the clock is no longer rating-only.
+            # A brand-new skill has no rating until its first real one, so its first rating also
+            # seeds A≈0.
             entry['last_activity_turn'] = self._global_activity_turns
 
             self._pending_flush_count += 1
