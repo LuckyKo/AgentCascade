@@ -567,6 +567,17 @@ def _consolidate_markers(
             if not success:
                 logger.warning(f"JSONL consolidation sync failed for '{target_agent_name}' — "
                                f"pool is authoritative; JSONL will be corrected on next compression.")
+            else:
+                # The consolidation rewrite shrinks/reorders the log's prefix, so every
+                # pinned prefix_sha256 for this log goes stale — the in-flight snapshots are
+                # invalidated, not corrupt. Retire them now (own guard) so the next boot scan
+                # never false-quarantines them; the agent still falls open to the JSONL loader.
+                try:
+                    from agent_cascade.snapshot import retire_snapshots_for_log
+                    retire_snapshots_for_log(agent_pool, log_inst.log_path)
+                except Exception as e:
+                    logger.debug(f"Snapshot retire after consolidation failed for "
+                                 f"'{target_agent_name}': {e}")
         except Exception as e:
             logger.error(f"Logger sync during consolidation failed for '{target_agent_name}': {e}")
             # Non-fatal: pool is correct

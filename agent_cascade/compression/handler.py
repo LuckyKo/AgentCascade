@@ -722,6 +722,18 @@ class CompressionHandler:
                          f"pool_len={len(conv) if conv else 0}, using reset_history() for full sync")
             log_inst.reset_history(conv, rewrite=True)
 
+            # An in-place compaction rewrite makes every pinned prefix_sha256 for this log
+            # stale, so the in-flight snapshots are invalidated (not corrupt). Retire them
+            # now so the next boot scan never false-quarantines them; the agent still falls
+            # open to the full-lineage JSONL loader. Its own guard: a failure here must not
+            # abort this logger sync nor disturb the notification flush below.
+            try:
+                from agent_cascade.snapshot import retire_snapshots_for_log
+                retire_snapshots_for_log(self.pool, log_inst.log_path)
+            except Exception as e:
+                logger.debug(f"Snapshot retire after {operation_name} sync failed for "
+                             f"'{instance_name}': {e}")
+
             # Then flush pending notifications AFTER rewrite (they'd be lost if written before)
             if instance is not None and getattr(instance, '_pending_notifications', None):
                 with instance._compression_lock:

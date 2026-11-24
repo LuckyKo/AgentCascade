@@ -496,7 +496,8 @@ instance's conversation log, clocks and (optionally) backend KV cache — can be
 atomically activate a different parked one. The **Sessions panel** (§4.4.2) is the user-facing view of
 these saves; the toggles that control them are persisted `enable_stack_swap` / `stack_restore_on_boot`
 (boot restore **ON** by default, independent of the autosave knob) and retention
-`SNAPSHOT_RETENTION_COUNT` (default **50**). **KV is a best-effort cache**: a snapshot may carry a KV
+`SNAPSHOT_RETENTION_COUNT` (default **50**) and corrupt-backlog retention `CORRUPT_SNAPSHOT_RETENTION_COUNT`
+(default **20**, `0` = off). **KV is a best-effort cache**: a snapshot may carry a KV
 config block to *verify/arm* on restore, but the stack code only ever *fires save/load — it never
 deletes KV files* (the JSONL log is the source of truth; orphaned KV files are acceptable).
 
@@ -519,7 +520,8 @@ Stack Swap (atomic park + activate):
 `swap_stack` (park source then activate target, with rollback), `snapshot_stack` (non-destructive
 capture), `prune_snapshots` (retention), `delete_stack` / `delete_snapshot` (refuse the active stack /
 a single save), `ensure_registry_loaded` (rebuild from disk), `quarantine_snapshot` (corrupt handling),
-and `list_stacks` (the single read model REST / WS / Telegram all render from so they can't drift).
+`retire_snapshots_for_log` (compaction-aware invalidation of a log's in-flight snapshots), and
+`prune_corrupt_snapshots` (bounds the `_corrupt/` backlog), with `list_stacks` the single read model REST / WS / Telegram all render from so they can't drift.
 
 **KV coverage (which instances get a KV block):** explicit captures (park / Save now / shutdown /
 restart) stay best-effort over every instance whose endpoint is `state_save_enabled` and resolves.
@@ -586,6 +588,21 @@ restores onto a live log, which also removes the older-snapshot-after-newer-rest
 Corrupt files are **quarantined** to `snapshots/_corrupt/` with a `.reason.txt` sidecar (never deleted) and
 are neither listed nor offered for restore; healthy siblings survive. `list_stacks` re-validates each entry
 and drops the corrupt ones from the UI.
+
+**Compaction retires, not quarantines:** a context compaction (`_sync_logger_after_compression`) or an
+L1→L2 consolidation rewrites the log's **first bytes in place**, so every pinned `prefix_sha256` for that
+log goes stale *by design* — those snapshots are invalidated, not corrupt. Both pool-aware rewrite sites
+call `snapshot.retire_snapshots_for_log(pool, log_inst.log_path)` right after the rewrite, which drops every
+in-flight snapshot referencing that log (reusing `delete_snapshot`; one aggregate INFO, **no** `_corrupt/`
+dump and **no** boot-scan WARNING). The validator/quarantine path is left unchanged, so genuine tamper /
+truncation / a missed secondary rewrite is still refused and quarantined exactly as before. A retired agent
+still recovers its full conversation on next boot: the envelope + registry row go, but the JSONL is the
+source of truth, so restore falls open to `load_session_from_log` (only the stale KV checkpoint is lost).
+
+**Corrupt-backlog retention (`CORRUPT_SNAPSHOT_RETENTION_COUNT`, default 20):** each `snapshots/_corrupt/`
+directory keeps only the newest N quarantined envelopes (and their `.reason.txt` sidecars); older pairs are
+deleted by `prune_corrupt_snapshots`, which runs once per boot at the end of `ensure_registry_loaded` (the
+same scan that can produce new entries). `0` disables pruning (retain all forensic evidence, unbounded).
 
 **Delete-snapshot:** `delete_snapshot` removes one saved session's envelope file + registry row and drops
 the stack key when its last snapshot goes (KV untouched); `delete_stack` removes a whole parked stack and

@@ -933,6 +933,21 @@ def load_snapshot_from_disk(snapshot_path: Path) -> SnapshotEnvelope:
         raise ValueError(f'snapshot {path} does not match schema: {exc}') from exc
 
 
+def _envelope_log_snapshots(raw, target: str):
+    """Yield each instance-snapshot dict in parsed envelope ``raw`` whose log-file
+    basename equals ``target`` (the proven log-basename join key — path-spelling-
+    independent, since the JSONL filename timestamp is immutable and unique)."""
+    instances = raw.get('instances') if isinstance(raw, dict) else None
+    if not isinstance(instances, dict):
+        return
+    for snap in instances.values():
+        if not isinstance(snap, dict):
+            continue
+        p = (snap.get('log') or {}).get('path')
+        if p and os.path.normcase(os.path.basename(str(p))) == target:
+            yield snap
+
+
 def find_birth_ts_for_log(pool, log_path) -> Optional[str]:
     """Return the ``kv_birth_ts`` recorded by the MOST RECENT snapshot envelope whose
     instance log reference matches ``log_path``; ``None`` if no envelope references it
@@ -971,15 +986,7 @@ def find_birth_ts_for_log(pool, log_path) -> Optional[str]:
             raw = json.loads(f.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
-        instances = raw.get('instances') if isinstance(raw, dict) else None
-        if not isinstance(instances, dict):
-            continue
-        for snap in instances.values():
-            if not isinstance(snap, dict):
-                continue
-            p = (snap.get('log') or {}).get('path')
-            if not p or os.path.normcase(os.path.basename(str(p))) != target:
-                continue
+        for snap in _envelope_log_snapshots(raw, target):
             ts = (snap.get('clocks') or {}).get('kv_birth_ts')
             if not ts:
                 continue
@@ -990,6 +997,61 @@ def find_birth_ts_for_log(pool, log_path) -> Optional[str]:
             if m > best_mtime:
                 best_mtime, best_ts = m, ts
     return best_ts
+
+
+def retire_snapshots_for_log(pool, log_path, *, registry: Optional[StackRegistry] = None) -> int:
+    """Drop every live snapshot whose captured log reference matches ``log_path``.
+
+    An in-place JSONL rewrite (compaction / L1->L2 consolidation) changes the log's first
+    bytes, so every pinned ``prefix_sha256`` for that log goes stale *by design* -- those
+    snapshots are invalidated, not corrupt. Retiring them here (one aggregate INFO line)
+    means the next boot's validation pass finds nothing to quarantine, while the agent
+    still falls open to the full-lineage JSONL loader. KV files are untouched (KV is a
+    cache) and the JSONL log itself is never modified. Best-effort: never raises into the
+    compaction that triggered it.
+
+    The match key is the log FILENAME basename -- the same immutable, uniquely-identifying
+    join key :func:`find_birth_ts_for_log` uses -- so it is independent of relative-vs-
+    absolute path spelling. Envelopes are parsed with a bare ``json.loads`` (NOT
+    :func:`load_snapshot_from_disk`, which is fail-closed and could refuse an unrelated
+    bad envelope here). The removal reuses :func:`delete_snapshot` so retirement never
+    re-implements the unlink / registry-drop. A schema-valid envelope is unlinked directly
+    (never routed through ``quarantine_snapshot``); a schema-invalid one is genuinely
+    malformed and is quarantined by ``delete_snapshot`` as it should be.
+    """
+    if not settings.ENABLE_STACK_SWAP:
+        return 0
+    if not log_path:
+        return 0
+    target = os.path.normcase(os.path.basename(str(log_path)))
+    if not target:
+        return 0
+    reg = _ensure_registry(pool, registry)
+
+    # Resolve matching (stack_id, snapshot_id) pairs up front: delete_snapshot mutates
+    # reg._snapshots, so we must not mutate the structure we are walking.
+    matches: List[Tuple[str, str]] = []
+    for stack_id, entries in list(reg._snapshots.items()):
+        for sid, path_str in list(entries):
+            try:
+                raw = json.loads(Path(path_str).read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue  # unreadable / bad envelope: leave it for the boot scan to handle
+            if any(_envelope_log_snapshots(raw, target)):
+                matches.append((stack_id, sid))
+
+    retired = 0
+    for stack_id, sid in matches:
+        try:
+            delete_snapshot(pool, stack_id, sid, registry=reg)
+            retired += 1
+        except Exception as exc:  # best-effort: one failure must not abort the rest
+            logger.debug('[STACK_SWAP] could not retire snapshot %s for log %s: %s',
+                         sid, log_path, exc)
+    if retired:
+        logger.info('[STACK_SWAP] retired %d snapshot(s) invalidated by log rewrite %s',
+                    retired, log_path)
+    return retired
 
 
 def _instantiate_instance(
@@ -1301,6 +1363,7 @@ def _ensure_registry(pool, registry: Optional[StackRegistry] = None) -> StackReg
 
 
 _CORRUPT_DIRNAME = '_corrupt'
+_REASON_SIDECAR_SUFFIX = '.reason.txt'
 
 
 def snapshot_problem(path: Path) -> Optional[str]:
@@ -1325,7 +1388,7 @@ def quarantine_snapshot(path: Path, reason: str) -> Optional[Path]:
     target = target_dir / path.name
     try:
         os.replace(path, target)
-        (target_dir / f'{path.name}.reason.txt').write_text(reason, encoding='utf-8')
+        (target_dir / f'{path.name}{_REASON_SIDECAR_SUFFIX}').write_text(reason, encoding='utf-8')
         logger.warning('[STACK_SWAP] quarantined corrupt snapshot %s: %s', path, reason)
         return target
     except OSError as exc:
@@ -1365,6 +1428,12 @@ def ensure_registry_loaded(pool) -> StackRegistry:
     persisted = load_active_stack_id()
     reg.set_active(persisted if persisted in reg._snapshots else None)
     pool._swap_registry_loaded = True
+    # Bound the quarantine backlog once per boot: this scan is itself the pass that can
+    # produce new _corrupt/ entries, so pruning here needs no separate boot hook.
+    try:
+        prune_corrupt_snapshots(pool)
+    except Exception as exc:  # backlog cleanup must never abort the registry load
+        logger.debug('[SNAPSHOT_PRUNE] corrupt-snapshot prune failed: %s', exc)
     return reg
 
 
@@ -2018,6 +2087,61 @@ def prune_snapshots(pool, *, registry: Optional[StackRegistry] = None) -> int:
         logger.info('[SNAPSHOT_PRUNE] retired %d snapshot(s) beyond retention %d',
                     pruned, retention)
     return pruned
+
+
+def prune_corrupt_snapshots(pool) -> int:
+    """Enforce ``CORRUPT_SNAPSHOT_RETENTION_COUNT`` on the ``snapshots/_corrupt/`` backlog.
+
+    Keeps the newest N quarantined envelopes and deletes older ones together with their
+    ``.reason.txt`` sidecars, so the quarantine backlog stays bounded across boots instead
+    of accumulating forever. Count-based mirror of :func:`prune_snapshots` (sort by mtime,
+    newest first). ``CORRUPT_SNAPSHOT_RETENTION_COUNT == 0`` disables pruning entirely
+    (keep every envelope). Best-effort: never raises into the boot scan. Returns the
+    number of envelopes deleted (and their sidecars).
+    """
+    if not settings.ENABLE_STACK_SWAP:
+        return 0
+    retention = settings.CORRUPT_SNAPSHOT_RETENTION_COUNT
+    if retention <= 0:
+        return 0  # off: retain every quarantined envelope
+    try:
+        corrupt_dir = get_snapshot_dir(pool) / _CORRUPT_DIRNAME
+    except Exception as exc:  # snapshot-dir resolution must never abort the boot scan
+        logger.debug('[SNAPSHOT_PRUNE] corrupt-dir resolution failed: %s', exc)
+        return 0
+    if not corrupt_dir.exists():
+        return 0
+    try:
+        envelopes = list(corrupt_dir.glob('*.json'))
+    except OSError as exc:
+        logger.debug('[SNAPSHOT_PRUNE] could not list %s: %s', corrupt_dir, exc)
+        return 0
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    envelopes.sort(key=_mtime, reverse=True)
+    deleted = 0
+    for path in envelopes[retention:]:
+        sidecar = corrupt_dir / f'{path.name}{_REASON_SIDECAR_SUFFIX}'
+        # Sidecar first: a leaked .json is re-pruned next boot, but a leaked
+        # .reason.txt would never be (prune only globs *.json).
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug('[SNAPSHOT_PRUNE] could not remove sidecar %s: %s', sidecar, exc)
+        try:
+            path.unlink(missing_ok=True)
+            deleted += 1
+        except OSError as exc:
+            logger.debug('[SNAPSHOT_PRUNE] could not remove corrupt snapshot %s: %s', path, exc)
+    if deleted:
+        logger.info('[SNAPSHOT_PRUNE] removed %d corrupt snapshot(s) beyond retention %d from %s',
+                    deleted, retention, corrupt_dir)
+    return deleted
 
 
 def list_stacks(pool, *, registry: Optional[StackRegistry] = None) -> Dict[str, Any]:

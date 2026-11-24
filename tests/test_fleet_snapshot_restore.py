@@ -18,12 +18,14 @@ Covers the restore-side contract from plan §9:
 """
 
 import json
+import logging
+import os
 import threading
 from pathlib import Path
 
 import pytest
 
-from agent_cascade import snapshot, state_ops
+from agent_cascade import settings, snapshot, state_ops
 from agent_cascade.agent_instance import AgentState
 from agent_cascade.snapshot import (
     SnapshotIntegrityError,
@@ -671,3 +673,168 @@ def test_reattach_raises_on_diverged_prefix_no_partial_replay(tmp_path):
     # Refusal happens before mutation: the instance is untouched and no log was materialised.
     assert inst.conversation == []
     assert p._logger._loggers == {}
+
+
+# ── BUG_0402: compaction-aware retirement + bounded _corrupt/ backlog ─────────
+#
+# These cover the compaction false-positive fix: an in-place log rewrite invalidates a
+# pinned prefix BY DESIGN, so the in-flight snapshot is RETIRED (not quarantined), and the
+# _corrupt/ quarantine backlog is bounded. The validator/quarantine gate is left untouched
+# and is still pinned by test_validate_refuses_same_size_rewritten_prefix above.
+
+
+def _rewrite_jsonl(path, meta_instance_name, message_count):
+    """Full in-place overwrite of an existing JSONL log (header re-emitted + messages
+    replaced) — the byte-level shape of a compaction rewrite. Distinct from the BUG_0345
+    raw same-size byte-flip fixture: a compaction rewrites the whole file, so the captured
+    prefix_sha256 (and byte offset) go stale.
+    """
+    lines = [json.dumps({'metadata': {'instance_name': meta_instance_name}})]
+    for i in range(message_count):
+        role = 'user' if i % 2 else 'assistant'
+        lines.append(json.dumps({'role': role, 'content': f'compact {i}'}))
+    Path(path).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def _capture_and_register(pool, snap_dir):
+    """Capture the live fleet to disk and register it so it counts as a live snapshot.
+
+    Mirrors the production park path (write envelope + add_snapshot) without invoking the
+    boot scan, so the snapshot is live in the registry but not boot-validated.
+    """
+    env = capture_fleet_snapshot(pool)
+    path = write_snapshot_to_disk(env, snap_dir)
+    reg = snapshot._ensure_registry(pool)
+    reg.add_snapshot(env.stack_id, env.snapshot_id, str(path))
+    return env, path
+
+
+def test_compaction_log_rewrite_retires_snapshots_not_quarantine(pool, tmp_path, monkeypatch, caplog):
+    """BUG_0402: an in-place compaction rewrite makes the captured prefix stale BY DESIGN,
+    so the in-flight snapshot must be RETIRED — envelope unlinked, registry row dropped, one
+    aggregate INFO — NOT quarantined. Nothing lands in ``_corrupt/`` and the boot scan has
+    nothing to false-quarantine.
+    """
+    caplog.set_level(logging.INFO, logger='agent_cascade.snapshot')
+    make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+    _write_all(tmp_path, pool, count=4)
+    snap_dir = tmp_path / 'snapshots'
+    env, path = _capture_and_register(pool, snap_dir)
+    reg = snapshot._ensure_registry(pool)
+    assert path.exists() and env.snapshot_id in reg.list_snapshots(env.stack_id)
+
+    # Compaction's in-place whole-file rewrite shrinks the log → captured pin goes stale.
+    log_path = tmp_path / 'worker.jsonl'
+    _rewrite_jsonl(log_path, WORKER, 2)
+
+    # Discriminator: the untouched validator NOW refuses the captured reference, i.e. a boot
+    # scan would quarantine this exact snapshot. So retirement — not a lucky pass — removed it.
+    snapshot._hash_cache.clear()
+    assert snapshot.validate_log_reference(env.instances[WORKER].log), \
+        'a boot scan would quarantine the stale-pinned snapshot; retirement must remove it first'
+
+    n = snapshot.retire_snapshots_for_log(pool, log_path)
+    assert n == 1
+    assert not path.exists(), 'retired envelope must be unlinked, not moved to _corrupt/'
+    assert env.snapshot_id not in reg.list_snapshots(env.stack_id), 'registry row must be dropped'
+    corrupt = snap_dir / '_corrupt'
+    assert not (corrupt.exists() and list(corrupt.glob('*'))), 'retirement must not quarantine'
+    assert '[STACK_SWAP] retired' in caplog.text, 'retirement must log one aggregate INFO'
+    assert 'quarantined' not in caplog.text.lower()
+
+
+def test_multiple_snapshots_for_one_log_all_retired(pool, tmp_path, monkeypatch, caplog):
+    """BUG_0402: one log pinned by MANY snapshots (the 13x symptom) — retire drops ALL of
+    them, not just one. A snapshot that does not reference the rewritten log is left intact.
+    """
+    caplog.set_level(logging.INFO, logger='agent_cascade.snapshot')
+    make_fleet(pool, tmp_path, monkeypatch, streaming_names=())
+    _write_all(tmp_path, pool, count=4)
+    snap_dir = tmp_path / 'snapshots'
+    worker_snapshots = [_capture_and_register(pool, snap_dir) for _ in range(3)]
+    stack_id = worker_snapshots[0][0].stack_id
+    reg = snapshot._ensure_registry(pool)
+    assert len(reg.list_snapshots(stack_id)) == 3
+
+    # A second snapshot that does NOT reference worker.jsonl, in a different stack. Built by
+    # hand (never matched by basename, so its full schema need not be restorable here).
+    other_env_path = snap_dir / 'other-sid.json'
+    other_env_path.write_text(json.dumps({
+        'schema_version': snapshot.CURRENT_SCHEMA_VERSION,
+        'snapshot_id': 'other-sid',
+        'stack_id': 'other',
+        'created_at': 0.0,
+        'trigger': 'user',
+        'instances': {'x': {'log': {'path': str(tmp_path / 'plain.jsonl'),
+                                    'message_count': 0, 'offset': 0, 'prefix_sha256': ''}}},
+        'pool_state': {},
+    }), encoding='utf-8')
+    reg.add_snapshot('other', 'other-sid', str(other_env_path))
+
+    n = snapshot.retire_snapshots_for_log(pool, tmp_path / 'worker.jsonl')
+    assert n == 3, f'all three worker-pinned snapshots must retire, got {n}'
+    for _e, p in worker_snapshots:
+        assert not p.exists(), 'every matching envelope must be unlinked'
+    for e, _p in worker_snapshots:
+        assert e.snapshot_id not in reg.list_snapshots(stack_id)
+    assert other_env_path.exists(), 'a snapshot for a different log must survive'
+    assert 'other-sid' in reg.list_snapshots('other')
+    assert not (snap_dir / '_corrupt').exists() or not list((snap_dir / '_corrupt').glob('*'))
+    assert '[STACK_SWAP] retired 3' in caplog.text
+
+
+def test_prune_corrupt_snapshots_keeps_newest_and_sidecars(pool, tmp_path, monkeypatch):
+    """BUG_0402: each _corrupt/ dir keeps only the newest CORRUPT_SNAPSHOT_RETENTION_COUNT
+    envelopes; older envelopes AND their .reason.txt sidecars are deleted (no orphan sidecar).
+    """
+    snap_dir = tmp_path / 'snapshots'
+    monkeypatch.setattr(snapshot, 'get_snapshot_dir', lambda pool: snap_dir)
+    corrupt = snap_dir / '_corrupt'
+    corrupt.mkdir(parents=True)
+
+    keep_n = 3
+    monkeypatch.setattr(settings, 'CORRUPT_SNAPSHOT_RETENTION_COUNT', keep_n)
+    total = keep_n + 3
+    sids = [f'sid-{i:02d}' for i in range(total)]
+    base_time = 1_000_000.0  # ascending mtime == ascending newness
+    for i, sid in enumerate(sids):
+        env = corrupt / f'{sid}.json'
+        sidecar = corrupt / f'{sid}.json.reason.txt'
+        env.write_text('{}', encoding='utf-8')
+        sidecar.write_text('reason', encoding='utf-8')
+        t = base_time + i
+        os.utime(env, (t, t))
+        os.utime(sidecar, (t, t))
+
+    removed = snapshot.prune_corrupt_snapshots(pool)
+    assert removed == total - keep_n
+    kept, dropped = sids[-keep_n:], sids[:-keep_n]  # newest keep_n survive (highest mtime)
+    for sid in kept:
+        assert (corrupt / f'{sid}.json').exists()
+        assert (corrupt / f'{sid}.json.reason.txt').exists(), 'newest pairs must be retained'
+    for sid in dropped:
+        assert not (corrupt / f'{sid}.json').exists()
+        assert not (corrupt / f'{sid}.json.reason.txt').exists(), 'sidecar must never be orphaned'
+    assert len(list(corrupt.glob('*.json'))) == keep_n
+
+
+def test_corrupt_retention_off_when_zero(pool, tmp_path, monkeypatch):
+    """BUG_0402: CORRUPT_SNAPSHOT_RETENTION_COUNT == 0 is the documented OFF state — every
+    quarantined envelope (and sidecar) is retained, nothing is deleted. Isolated via monkeypatch
+    so it cannot leak the off-state into the default-cap test above (secondary-cap-masks-knob).
+    """
+    snap_dir = tmp_path / 'snapshots'
+    monkeypatch.setattr(snapshot, 'get_snapshot_dir', lambda pool: snap_dir)
+    corrupt = snap_dir / '_corrupt'
+    corrupt.mkdir(parents=True)
+    monkeypatch.setattr(settings, 'CORRUPT_SNAPSHOT_RETENTION_COUNT', 0)
+
+    for i in range(5):
+        sid = f'off-{i}'
+        (corrupt / f'{sid}.json').write_text('{}', encoding='utf-8')
+        (corrupt / f'{sid}.json.reason.txt').write_text('r', encoding='utf-8')
+
+    removed = snapshot.prune_corrupt_snapshots(pool)
+    assert removed == 0
+    assert len(list(corrupt.glob('*.json'))) == 5
+    assert len(list(corrupt.glob('*.reason.txt'))) == 5

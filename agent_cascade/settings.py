@@ -753,6 +753,31 @@ def _parse_snapshot_retention() -> int:
 SNAPSHOT_RETENTION_COUNT: int = _parse_snapshot_retention()
 
 
+def _parse_corrupt_snapshot_retention() -> int:
+    """Defensively parse AGENT_CASCADE_CORRUPT_SNAPSHOT_RETENTION_COUNT; fall back to 20.
+
+    Bounds how many of the most-recent quarantined ("corrupt") snapshot envelopes are
+    kept per ``snapshots/_corrupt/`` directory; older envelopes (and their ``.reason.txt``
+    sidecars) are pruned beyond this. Unlike live-snapshot retention, a value of 0 means
+    OFF (keep every quarantined envelope, i.e. unbounded) — never clamped up to 1 — so a
+    deliberate "retain all forensic evidence" setting is honored. Negative values are
+    treated as 0 (off).
+    """
+    raw = os.getenv('AGENT_CASCADE_CORRUPT_SNAPSHOT_RETENTION_COUNT', '20').strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 20
+    return value if value >= 0 else 0
+
+
+# Maximum number of most-recent quarantined snapshot envelopes retained per
+# ``snapshots/_corrupt/`` directory before older ones (and their ``.reason.txt``
+# sidecars) are deleted. Units: files. Default 20. ``0`` = off (keep all). Only read
+# when ENABLE_STACK_SWAP is on.
+CORRUPT_SNAPSHOT_RETENTION_COUNT: int = _parse_corrupt_snapshot_retention()
+
+
 def _parse_stream_tail() -> int:
     """Defensively parse AGENT_CASCADE_STREAM_TAIL; fall back to 1 on bad values.
 
