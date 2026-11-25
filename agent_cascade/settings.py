@@ -1228,6 +1228,33 @@ SKILL_ACTIVE_TARGET_K: float = float(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_TARGE
 SKILL_ACTIVE_MIN_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MIN_CAP', '20'))
 SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', '200'))
 
+# ── Task-aware skill cache (LRU working-set + prefetch-probation) ──────────
+# When enabled, the active-skill pool is sized by a fixed target and managed by a
+# single eviction order (expired probation → remaining probation → demand LRU),
+# replacing the multiplier-driven sizing of rebalance_active_skills. Master switch
+# skill_cache_active_enabled defaults OFF: every cache method returns without
+# touching the pool, so the feature is fully inert until explicitly turned on.
+# The numeric settings are clamped to [SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_MAX_CAP]
+# by the cache itself so a stray value can't grow the pool beyond the hard ceiling.
+# Master switch for the task-aware skill cache. False (default) = complete no-op:
+# the prefetch worker and eviction tick short-circuit before reading or writing the
+# pool. True = machinery runs and logs its decisions; real enablement additionally
+# gated on the KV-prefix audit, so this flag landing OFF keeps production unchanged.
+SKILL_CACHE_ACTIVE_ENABLED: bool = (
+    os.getenv('AGENT_CASCADE_SKILL_CACHE_ACTIVE_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on'))
+# Desired steady-state size of the active-skill pool (skills). Operating band 50-80.
+SKILL_CACHE_TARGET_SIZE: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_TARGET_SIZE', '60'))
+# Number of top-ranked inactive skills a root-task-boundary prefetch speculatively
+# admits (as probation). Demand recall peaks ~12; noise stays bounded by
+# MAX_AUTO_SKILLS_PER_CALL at hint delivery, so a larger K is harmless.
+SKILL_CACHE_PREFETCH_TOP_K: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_PREFETCH_TOP_K', '12'))
+# How long (global activity-turns) a prefetched probation skill may idle before it
+# becomes eligible to evict first. Bounds idle-prefetch churn; insensitive to hit-rate.
+SKILL_CACHE_PROBATION_TTL_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_PROBATION_TTL_TURNS', '50'))
+# Upper bound on evictions applied in a single cache_evict_tick, so one boundary
+# cannot sweep the active set. Bounds churn, independent of how far over target it is.
+SKILL_CACHE_MAX_EVICT_PER_TICK: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_MAX_EVICT_PER_TICK', '10'))
+
 # ── Skill-scoring constants ──────────────────
 # Every formula/gate constant in the skill scoring is a named setting here. Each default
 # matches the hard-coded fallbacks read by pool/core.py and skills/manager.py

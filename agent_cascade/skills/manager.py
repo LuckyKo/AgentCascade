@@ -30,7 +30,10 @@ from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURN
                                     CANDIDATE_MAX_PENDING_DAYS, CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO,
                                     LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL, SKILL_ACTIVE_MAX_CAP,
                                     SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K, SKILL_ALWAYS_PROTECTED_DEFAULT,
-                                    SKILL_CACHE_TTL_SECONDS, SKILL_MATCH_THRESHOLD, SKILL_WALLCLOCK_SECONDS_PER_TURN,
+                                    SKILL_CACHE_ACTIVE_ENABLED, SKILL_CACHE_MAX_EVICT_PER_TICK,
+                                    SKILL_CACHE_PREFETCH_TOP_K, SKILL_CACHE_PROBATION_TTL_TURNS,
+                                    SKILL_CACHE_TARGET_SIZE, SKILL_CACHE_TTL_SECONDS, SKILL_FAIR_WINDOW_TURNS,
+                                    SKILL_MATCH_THRESHOLD, SKILL_WALLCLOCK_SECONDS_PER_TURN,
                                     SKILLS_DISABLED, parse_skill_always_protected)
 
 from .cache_helper import compute_scan_signature
@@ -167,6 +170,19 @@ def _is_explicit_skill_list(load_skill_value) -> bool:
     return False
 
 
+# ── Task-aware skill cache: origin + inactive_reason vocabularies ───────────
+# Additive metrics fields (schema 1.3, readers use .get(field, default)); kept here as the
+# single source of truth so no call site invents a different spelling.
+#   origin        — how a skill entered the active pool. Missing/None is treated as DEMAND.
+#   inactive_reason — why an inactive skill is inactive, so the cache never auto-revives an
+#                     operator-disabled skill and the UI can read it differently.
+ORIGIN_DEMAND = 'demand'
+ORIGIN_PROBATION = 'probation'
+REASON_MANUAL = 'manual_disabled'
+REASON_ENV = 'env_disabled'
+REASON_CACHE = 'cache_evicted'
+
+
 def _default_metrics_entry(status: str = 'active') -> dict:
     """Fresh per-skill metrics record (schema 1.3). Single source for the default shape so
     a future field addition happens in one place instead of being copy-pasted at every
@@ -175,6 +191,11 @@ def _default_metrics_entry(status: str = 'active') -> dict:
     reader of these fields must use ``.get(field, default)`` — never assume this shape."""
     return {'total_loads': 0, 'by_version': {}, 'status': status,
             'last_activity_turn': None, 'last_load_turn': None, 'hints': 0,
+            # Task-aware skill cache (additive; readers use .get(field, default)).
+            # origin = 'demand' (agent loaded it) | 'probation' (speculative prefetch);
+            # missing == demand. prefetched_turn = global activity-turn the skill was last
+            # prefetched into probation (None unless origin==probation).
+            'origin': None, 'inactive_reason': None, 'prefetched_turn': None,
             # BUG_0312 skill-evolution ledger (additive; no schema bump — readers use
             # .get(field, default)). promotions/discards = Gate B rating-gate outcomes
             # (evaluate_candidates), updates = candidate registered (SKILL.md rewrite /
@@ -684,6 +705,10 @@ class SkillManager:
                     entry = _default_metrics_entry(new_status)
                     self._metrics[name] = entry
                 entry['status'] = new_status
+                # provenance: this flip path is the operator/UI toggle, so a disable records
+                # manual_disabled (the cache never auto-revives such a skill); an enable clears
+                # any prior reason. Automatic retirements set their own reason at their site.
+                entry['inactive_reason'] = REASON_MANUAL if new_status == 'inactive' else None
                 # BUG_0312 churn: a disable/enable is a lifecycle transition.
                 entry['transitions'] = entry.get('transitions', 0) + 1
 
@@ -1053,9 +1078,14 @@ class SkillManager:
                 # skills it just evicted. The lookup is GUARDED (info.get(...)): any name outside
                 # serve_names must not raise KeyError, which the blanket except below would swallow into a
                 # silent no-op that still returns a plausible-looking dict.
+                # When the cache is on, never refill a slot with a skill an operator disabled
+                # (manual_disabled) — that would override operator intent. No-op when off.
+                _skip_manual = self._cache_enabled()
                 inactive_cands = [nm for nm, m in metrics_snap.items()
                                   if isinstance(m, dict) and m.get('status') == 'inactive'
-                                  and str(nm).lower() in servable and str(nm).lower() not in env_disabled]
+                                  and str(nm).lower() in servable and str(nm).lower() not in env_disabled
+                                  and not (_skip_manual
+                                           and m.get('inactive_reason') == REASON_MANUAL)]
                 valuable_inactive = [nm for nm in inactive_cands
                                      if info.get(nm, {}).get('class') in _VALUE_CLASSES]
                 inactive_ranked = sorted(valuable_inactive,
@@ -1305,6 +1335,13 @@ class SkillManager:
                 # stamp read by the Phase 2 §2.4 eviction protection (only demand loads earn it).
                 entry['last_activity_turn'] = self._global_activity_turns
                 entry['last_load_turn'] = self._global_activity_turns
+                # Cache Phase 2: a deliberate load "confirms" a speculatively prefetched skill,
+                # promoting it from probation to demand and dropping its probation marker so it
+                # joins the protected LRU working set. Harmless when the cache is off: no skill
+                # is ever tagged probation then, so the guard below is always false.
+                if entry.get('origin') == ORIGIN_PROBATION:
+                    entry['origin'] = ORIGIN_DEMAND
+                    entry['prefetched_turn'] = None
             entry['by_version'][version] = entry['by_version'].get(version, 0) + 1
             # Real "last used" supersedes any migration seed (schema 1.3). Multi-instance
             # last-writer-wins = most recently used; runs under _metrics_lock like the counters.
@@ -2182,11 +2219,208 @@ class SkillManager:
         """
         try:
             if self.is_skill_disabled(name):
+                # Cache: an operator-disabled skill must never be auto-revived by an automatic
+                # (AUTO-match / explicit-list) load. cache_evicted and never-disabled skills
+                # still revive normally. No-op when the cache is off.
+                if self._cache_enabled() and self._inactive_reason(name) == REASON_MANUAL:
+                    return
                 ok, msg = self.enable_skill(name)
                 if not ok:
                     logger.warning("[SKILLS] Could not re-enable '%s' during resolution: %s", name, msg)
         except Exception as e:  # noqa: BLE001 — never break resolution on a re-enable failure
             logger.warning("[SKILLS] Re-enable of '%s' raised during resolution: %s", name, e)
+
+    # ── Task-aware skill cache (prefetch + probation-priority eviction) ──────
+    # All methods no-op when skill_cache_active_enabled is off, and run in shadow mode
+    # (compute + log, do not mutate) unless a caller passes commit=True. Fire-and-forget
+    # best-effort: every failure is swallowed so the cache can never break the agent loop.
+    def _cache_enabled(self) -> bool:
+        """Master cache switch, read live so a config change applies without restart; falls back
+        to the compiled default when no pool/config exists (e.g. a pool-less unit-test manager)."""
+        pool = getattr(self, 'pool', None)
+        cfg = getattr(pool, 'llm_cfg', None) if pool is not None else None
+        if isinstance(cfg, dict) and 'skill_cache_active_enabled' in cfg:
+            return bool(cfg['skill_cache_active_enabled'])
+        return bool(SKILL_CACHE_ACTIVE_ENABLED)
+
+    def _cache_num(self, key: str, default: int) -> int:
+        """Numeric cache setting: live llm_cfg override, else the compiled default (clamped at use)."""
+        pool = getattr(self, 'pool', None)
+        cfg = getattr(pool, 'llm_cfg', None) if pool is not None else None
+        if isinstance(cfg, dict) and cfg.get(key) is not None:
+            try:
+                return int(cfg[key])
+            except (TypeError, ValueError):
+                return default
+        return default
+
+    def _cache_target(self) -> int:
+        """Desired active-pool size, clamped to the existing [MIN_CAP, MAX_CAP] hard bounds."""
+        return max(SKILL_ACTIVE_MIN_CAP,
+                   min(SKILL_ACTIVE_MAX_CAP,
+                       self._cache_num('skill_cache_target_size', SKILL_CACHE_TARGET_SIZE)))
+
+    def _inactive_reason(self, name: str) -> Optional[str]:
+        """Persisted inactive_reason for a skill by any casing (None when active/unknown)."""
+        want = str(name).lower()
+        with self._metrics_lock:
+            for nm, m in self._metrics.items():
+                if isinstance(m, dict) and str(nm).lower() == want:
+                    return m.get('inactive_reason')
+        return None
+
+    def prefetch_for_task(self, task_text: str, *, commit: bool = False) -> List[str]:
+        """Task-boundary prefetch: speculatively admit up to top_k inactive skills that match
+        task_text, tagged origin=probation, WITHOUT bumping load/hint/rating counters (a prefetch
+        is an attempt, not a signal of value). Filters out env-disabled, operator-disabled
+        (manual_disabled), already-active, and BAD-classified candidates; ranks survivors by a
+        PROTECTED/USEFUL class bonus then recency (last_used) then total_loads — USELESS/UNPROVEN
+        get no penalty, the classifier's cache role is veto (BAD) + bonus only.
+
+        Shadow by default (commit=False): logs what it would admit and mutates nothing.
+        Returns the decided names; empty when the cache is off or the task text is blank."""
+        if not self._cache_enabled() or not (task_text or '').strip():
+            return []
+        top_k = self._cache_num('skill_cache_prefetch_top_k', SKILL_CACHE_PREFETCH_TOP_K)
+        if top_k <= 0:
+            return []
+        env_disabled = set(SKILLS_DISABLED)
+        score_kw = self._scoring_kwargs()
+        now = time.time()
+        try:
+            cands = self.match_skills(task_text, include_inactive=True, cap=top_k)
+        except Exception as e:  # noqa: BLE001 — prefetch must never break the loop
+            logger.warning('[SKILL-CACHE] prefetch match failed: %s', e)
+            return []
+        if not cands:
+            return []
+        with self._write_lock:
+            disabled = {str(n).lower() for n in self._disabled_names}
+        with self._metrics_lock:
+            global_turns = self._global_activity_turns
+            snap = {str(k).lower(): v for k, v in self._metrics.items() if isinstance(v, dict)}
+
+        def _cls_key(entry: dict):
+            r_ = entry.get('ratings') or {}
+            n = r_.get('count', 0)
+            avg = (r_['sum'] / n) if n else None
+            A = self._activity_age(entry, global_turns, now)
+            return skill_classify(n, avg, A, **score_kw['classify'])
+
+        decided: List[str] = []
+        for name, _score in cands:
+            key = str(name).lower()
+            if key in env_disabled or key not in disabled:  # env-disabled or already active → skip
+                continue
+            entry = snap.get(key, {})
+            if entry.get('inactive_reason') == REASON_MANUAL:  # operator-disabled: never auto-revive
+                continue
+            if _cls_key(entry) == CLASS_BAD:  # hard veto: never speculate on known-bad
+                continue
+            decided.append(name)
+            if len(decided) >= top_k:
+                break
+        if not decided:
+            return []
+        decided.sort(key=lambda nm: (
+            1 if _cls_key(snap.get(str(nm).lower(), {})) in _VALUE_CLASSES else 0,
+            (snap.get(str(nm).lower(), {}) or {}).get('last_used') or '',
+            (snap.get(str(nm).lower(), {}) or {}).get('total_loads', 0),
+            str(nm).lower(),
+        ), reverse=True)
+        decided = decided[:top_k]
+        logger.info('[SKILL-CACHE] prefetch%s admitted=%d/%d %s',
+                    '' if commit else ' (shadow)', len(decided), top_k, decided)
+        if not commit:
+            return decided
+        # Apply admission (additive only — never evicts, so it cannot disturb a working agent).
+        with self._write_lock:
+            for name in decided:
+                self._disabled_names.discard(str(name).lower())
+            with self._metrics_lock:
+                g = self._global_activity_turns
+                for name in decided:
+                    key = str(name).lower()
+                    exact = next((k for k in self._metrics if str(k).lower() == key), None)
+                    entry = self._metrics.get(exact) if exact is not None else None
+                    if entry is None:
+                        entry = _default_metrics_entry('active')
+                        self._metrics[name] = entry
+                    entry['status'] = 'active'
+                    entry['origin'] = ORIGIN_PROBATION
+                    entry['prefetched_turn'] = g
+                    if entry.get('inactive_reason') == REASON_CACHE:
+                        entry['inactive_reason'] = None  # cache-evicted → serving again
+        self._refresh_registry_after_flip()
+        return decided
+
+    def cache_evict_tick(self, *, commit: bool = False) -> List[str]:
+        """Boundary-time eviction tick. When the active pool exceeds the target, retire the worst
+        fitters in one probation-priority order:
+          1. expired probation (prefetched_turn older than the probation TTL),
+          2. remaining probation, oldest-first,
+          3. demand skills, least-recently-loaded first,
+        bounded by min(SKILL_CACHE_MAX_EVICT_PER_TICK, pool-target) so one tick cannot sweep the
+        set. A demand skill deliberately loaded within the fair window is protected this tick.
+
+        Shadow by default (commit=False): logs the chosen victims, mutates nothing. Returns victim
+        names; empty when the cache is off or the pool is at/below target."""
+        if not self._cache_enabled():
+            return []
+        max_ev = self._cache_num('skill_cache_max_evict_per_tick', SKILL_CACHE_MAX_EVICT_PER_TICK)
+        if max_ev <= 0:
+            return []
+        ttl = self._cache_num('skill_cache_probation_ttl_turns', SKILL_CACHE_PROBATION_TTL_TURNS)
+        target = self._cache_target()
+        with self._metrics_lock:
+            global_turns = self._global_activity_turns
+            rows = [(str(k).lower(), {
+                'origin': v.get('origin'),
+                'prefetched_turn': v.get('prefetched_turn'),
+                'last_load_turn': v.get('last_load_turn'),
+            }) for k, v in self._metrics.items()
+                if isinstance(v, dict) and v.get('status') == 'active']
+        if len(rows) <= target:
+            return []
+        budget = min(max_ev, len(rows) - target)
+        prob, demand = [], []
+        for name, d in rows:
+            if d['origin'] == ORIGIN_PROBATION:
+                prob.append((global_turns - (d['prefetched_turn'] or 0), name))
+            elif d['last_load_turn'] is None or (global_turns - d['last_load_turn']) > SKILL_FAIR_WINDOW_TURNS:
+                # never deliberately loaded (most evictable) or outside the fair window → a victim
+                demand.append((d['last_load_turn'] if d['last_load_turn'] is not None else -1, name))
+            # else: recently loaded demand → protected this tick (skip entirely)
+        expired = sorted([p for p in prob if p[0] > ttl], key=lambda p: (p[0], p[1]))
+        fresh_prob = sorted([p for p in prob if p[0] <= ttl], key=lambda p: (p[0], p[1]))
+        demand.sort(key=lambda p: (p[0], p[1]))  # LRU: least-recently-loaded first
+        victims = [name for _, name in (expired + fresh_prob + demand)[:budget]]
+        if not victims:
+            return []
+        logger.info('[SKILL-CACHE] evict%s victims=%d pool=%d target=%d %s',
+                    '' if commit else ' (shadow)', len(victims), len(rows), target, victims)
+        if not commit:
+            return victims
+        with self._write_lock:
+            for name in victims:
+                self._disabled_names.add(name)
+            with self._metrics_lock:
+                for name in victims:
+                    exact = next((k for k in self._metrics if str(k).lower() == name), None)
+                    if exact is not None:
+                        self._metrics[exact]['status'] = 'inactive'
+                        self._metrics[exact]['inactive_reason'] = REASON_CACHE
+        self._refresh_registry_after_flip()
+        return victims
+
+    def _refresh_registry_after_flip(self) -> None:
+        """Make an in-memory active/inactive flip immediately servable (same post-flip step as
+        _apply_status_flip): invalidate the discovery cache and re-scan the registry."""
+        self.invalidate_cache()
+        try:
+            self._ensure_discovered()
+        except Exception as e:  # noqa: BLE001 — discovery refresh must never break a cache tick
+            logger.warning('[SKILL-CACHE] registry refresh failed: %s', e)
 
     def resolve_load_skill_names(
         self,

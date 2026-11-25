@@ -21,6 +21,8 @@ original file; only the mixin composition, module constants, and imports were ad
 
 from __future__ import annotations
 
+import threading
+
 from typing import Any, Callable, List, Optional, Tuple
 
 from agent_cascade.agent_instance import AgentInstance
@@ -157,7 +159,42 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                     sm.bump_activity_turn()
                 except Exception:
                     pass  # activity clock must never break the agent loop
+                # Task-aware skill cache boundary (root-only, fire-and-forget). Children inherit the
+                # parent's already-warmed active set, so only top-level user tasks prefetch (v1).
+                # Runs shadow by default (commit=False → log only) and no-ops when the cache flag
+                # is off, so this is inert in production. Off the LLM path: no turn-pipeline delay.
+                if sm._cache_enabled() and getattr(instance, 'parent_instance', None) is None:
+                    task_text = self._extract_cache_task_text(instance)
+                    threading.Thread(
+                        target=self._run_skill_cache_boundary, args=(sm, task_text),
+                        name='skill-cache-boundary', daemon=True).start()
         return turns - 1
+
+    def _extract_cache_task_text(self, instance) -> str:
+        """First user message of the run, for skill-cache prefetch matching. Cheap, in-memory;
+        capped so a huge first message can't blow up the matcher."""
+        try:
+            for m in instance.conversation:
+                if msg_field(m, 'role') == USER:
+                    c = msg_field(m, 'content', '')
+                    if isinstance(c, str):
+                        return c[:4000]
+                    if isinstance(c, list):
+                        return ' '.join(
+                            str(it.get('text', '')) for it in c
+                            if isinstance(it, dict) and it.get('text'))[:4000]
+        except Exception:  # noqa: BLE001 — task-text extraction must never break the loop
+            pass
+        return ''
+
+    def _run_skill_cache_boundary(self, skill_manager, task_text: str) -> None:
+        """Background worker body: prefetch then eviction tick, best-effort. Called on a daemon
+        thread from the root task boundary; never awaited by the turn pipeline."""
+        try:
+            skill_manager.prefetch_for_task(task_text)
+            skill_manager.cache_evict_tick()
+        except Exception as e:  # noqa: BLE001 — the cache must never break the agent loop
+            logger.debug('[SKILL-CACHE] boundary worker failed: %s', e)
 
     # ── Unified injection helpers (atomic: append + cache sync + log) ───────
 
