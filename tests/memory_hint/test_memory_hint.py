@@ -313,7 +313,28 @@ class _RecordingTelemetry:
         self.actioned.append((instance_name, rel_path))
 
 
+@pytest.fixture(autouse=True)
+def _pin_inline_delivery(request, monkeypatch):
+    """Honour a per-class INLINE gate; the compiled settings default is now ON.
+
+    MEMORY_HINT_INLINE now defaults ON (same-turn inline delivery), so submit/_build_job
+    routes a matched hint to the inline completion handle instead of the _tool_warnings
+    queue. The deferred-delivery suites below pin INLINE = False to keep exercising the
+    non-inline path deterministically (no race with the peek window). The inline-mode
+    class (TestBug0382SameTurn) opts out — it has no INLINE attr and keeps its own
+    autouse default-ON fixture. Classes without an INLINE attr are left untouched.
+    """
+    gate = getattr(request.cls, 'INLINE', None)
+    if gate is None:
+        return
+    monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', gate)
+
+
 class TestManagerDedup:
+    # Deferred _tool_warnings delivery: pin the inline gate OFF so submit/_build_job
+    # routes to the worker queue as this suite asserts (see _pin_inline_delivery).
+    INLINE = False
+
     def _manager_with_lesson(self, tmp_path, enabled=True, skill_manager=None):
         v = tmp_path / 'proj' / '.agent_lessons'
         v.mkdir(parents=True)
@@ -1295,10 +1316,10 @@ class TestManagerSkillHints:
 
 
 class TestSkillHintRecurrence:
-    """BUG_0225: a skill hinted repeatedly this session gets a recurrence marker.
+    """BUG_0225: a skill hinted N+ times recently gets a recurrence marker.
 
-    The per-session counter (``inst._skill_hint_counts``) is incremented on each
-    delivery; the marker (``— hinted Nth time this session, not loaded``) appears on
+    The per-skill counter (``inst._skill_hint_counts``) is incremented on each
+    delivery; the marker (``— hinted Nth time recently, not loaded``) appears on
     the 3rd+ delivery and is suppressed once the skill is loaded. Cooldown normally
     gates repeats, so each test clears ``inst._recently_skill_hinted`` between runs to
     model the cooldown window expiring.
@@ -1355,7 +1376,7 @@ class TestSkillHintRecurrence:
         assert len(inst._tool_warnings) == 1
         hint = inst._tool_warnings[0]
         assert 're-derive-line-ranges' in hint
-        assert 'time this session' not in hint
+        assert 'time recently' not in hint
         assert inst._skill_hint_counts['re-derive-line-ranges'] == 1
 
     def test_third_hint_carries_recurrence_marker(self, tmp_path):
@@ -1367,10 +1388,10 @@ class TestSkillHintRecurrence:
         assert len(inst._tool_warnings) == 3
         first, second, third = inst._tool_warnings
         # 1st and 2nd deliveries carry NO recurrence marker.
-        assert 'time this session' not in first
-        assert 'time this session' not in second
+        assert 'time recently' not in first
+        assert 'time recently' not in second
         # 3rd delivery carries the marker + the not-loaded annotation.
-        assert '3rd time this session' in third
+        assert '3rd time recently' in third
         assert 'not loaded' in third
         assert inst._skill_hint_counts['re-derive-line-ranges'] == 3
 
@@ -1390,7 +1411,7 @@ class TestSkillHintRecurrence:
         # 3rd tool warning is created. The count is capped at 2, so no marker appears.
         assert len(inst._tool_warnings) == 2
         for w in inst._tool_warnings:
-            assert 'time this session' not in w
+            assert 'time recently' not in w
         assert inst._skill_hint_counts['re-derive-line-ranges'] == 2
 
     def test_marker_uses_ordinal_for_higher_counts(self, tmp_path):
@@ -1400,7 +1421,7 @@ class TestSkillHintRecurrence:
             mgr._process_job(self._job(turn))
             self._clear_cooldown(inst)
         last = inst._tool_warnings[-1]
-        assert '5th time this session' in last
+        assert '5th time recently' in last
         assert inst._skill_hint_counts['re-derive-line-ranges'] == 5
 
     def test_skill_block_loaded_skill_omits_not_loaded_suffix(self, tmp_path):
@@ -1412,18 +1433,18 @@ class TestSkillHintRecurrence:
         mgr, _inst = self._mgr_for(tmp_path)
         out = mgr._skill_block(['re-derive-line-ranges'],
                                {'re-derive-line-ranges': 4}, {'re-derive-line-ranges'})
-        assert 'hinted 4th time this session' in out
+        assert 'hinted 4th time recently' in out
         assert 'not loaded' not in out
         # Not in the loaded set → the 'not loaded' suffix IS appended.
         out2 = mgr._skill_block(['re-derive-line-ranges'],
                                 {'re-derive-line-ranges': 4}, set())
-        assert 'hinted 4th time this session, not loaded' in out2
+        assert 'hinted 4th time recently, not loaded' in out2
 
     def test_skill_block_no_marker_below_threshold(self, tmp_path):
         """A count < 3 → no recurrence marker, even if a count is provided."""
         mgr, _inst = self._mgr_for(tmp_path)
         out = mgr._skill_block(['x'], {'x': 2}, set())
-        assert 'time this session' not in out
+        assert 'time recently' not in out
         assert out == 'Suggested skill:\n  - x'
 
     @pytest.mark.parametrize('n,expected', [
@@ -1457,6 +1478,10 @@ def _wait_until(pred, timeout=3.0, interval=0.01):
 
 class TestWorkerRestart:
     """start()/stop() lifecycle of the daemon worker (real manager, stub pool)."""
+
+    # Delivery is asserted via _tool_warnings, so pin inline OFF under the now-ON
+    # default so the worker still queues deferred (see _pin_inline_delivery).
+    INLINE = False
 
     @staticmethod
     def _make_mgr(tmp_path):
@@ -1977,9 +2002,10 @@ class TestInstanceReset:
         # Skill-hint state (feature: skills-in-memory-hints) is cleared too.
         inst._recently_skill_hinted = {'docker-best-practices': 456.0}
         inst._last_skill_hint_turn = 9
-        # The session-scoped recurrence counter (BUG_0225) is deliberately NOT reset by
-        # this compression-path helper — it must survive, so the "this session" marker
-        # stays accurate across a within-session compression.
+        # The in-context recurrence counter (BUG_0225) is deliberately NOT reset by
+        # this L1 compression-path helper — it must survive an L1 compaction (which
+        # retains a tail), so the "recently" marker stays accurate. (It IS reset at
+        # the L2 roll-up boundary, BUG_0409, and at session reset.)
         inst._skill_hint_counts = {'docker-best-practices': 4}
         inst._reset_memory_hint_state()
         assert inst._memories_read == set()
@@ -1988,7 +2014,7 @@ class TestInstanceReset:
         assert inst._recently_skill_hinted == {}
         assert inst._last_skill_hint_turn == -1
         assert inst._skill_hint_counts == {'docker-best-practices': 4}, \
-            'the session-scoped counter must survive a compression reset'
+            'the in-context counter must survive an L1 (this helper) reset'
 
     def test_session_reset_clears_skill_hint_counts(self):
         """reset_conversation() (the true session boundary) clears the counter (BUG_0225)."""
@@ -2874,35 +2900,32 @@ class _AttachInst:
     """Minimal instance exposing only what the inline peek reads/writes.
 
     _pending_hint_job is the engine-thread-only handle the submit hook stashes; the peek
-    reads it, claims it, and clears it. conversation is appended to by the recorded
-    _append_and_log_to_llm so the test can assert the SYSTEM note landed.
+    reads it, claims it, and clears it. BUG_0410: the peek now queues the hint onto
+    _tool_warnings (via _queue_tool_warning, which acquires _compression_lock), so the
+    double exposes both. conversation is kept for the no-op assertions.
     """
 
     def __init__(self, name='w'):
         self.instance_name = name
         self.conversation = []
         self._pending_hint_job = None
+        # BUG_0410: the inline peek queues via _queue_tool_warning → _tool_warnings,
+        # which acquires _compression_lock. Both must exist on the double.
+        self._tool_warnings = []
+        self._compression_lock = threading.RLock()
 
 
 class _InlineFakeEngine(MemoryHintMixin):
     """Engine double that drives the real _maybe_attach_inline_memory_hint.
 
-    Only the outermost transport is replaced: _append_and_log_to_llm records exactly the
-    message the peek would hand to the append path (and mirrors it into conversation +
-    llm_messages), so the test asserts role==SYSTEM + exact text — the R1 invariant —
-    without the full logger/cache machinery. The peek logic itself is the production
-    method (inherited from MemoryHintMixin), not a stub.
+    The peek logic is the production method (inherited from MemoryHintMixin); only the
+    pool is injected. BUG_0410: the inline path now queues via _queue_tool_warning (the
+    notification queue), so tests assert on the instance's _tool_warnings rather than a
+    captured SYSTEM message — no append transport is stubbed anymore.
     """
 
     def __init__(self, pool):
         self.pool = pool
-        self.appended = []  # list of (instance, Message)
-
-    def _append_and_log_to_llm(self, instance, msg, llm_messages, *, lock_held=False):
-        self.appended.append((instance, msg))
-        instance.conversation.append(msg)
-        if llm_messages is not None:
-            llm_messages.append(msg)
 
 
 class TestBug0382SameTurn:
@@ -2936,26 +2959,24 @@ class TestBug0382SameTurn:
 
     # ── Peek path ────────────────────────────────────────────────────────────
 
-    def test_ready_claim_inline_appends_system_note(self):
-        """A ready, non-empty handle claims inline and appends it as a SYSTEM note."""
-        eng = _InlineFakeEngine(MagicMock())
+    def test_ready_claim_inline_queues_tool_warning(self):
+        """A ready, non-empty handle claims inline and queues the hint onto
+        _tool_warnings (BUG_0410: the notification queue, NOT a standalone SYSTEM
+        message appended to the conversation)."""
+        pool = MagicMock()
+        eng = _InlineFakeEngine(pool)
         inst = _AttachInst('w')
+        pool.get_instance.return_value = inst  # _queue_tool_warning looks up by name
         h = HintHandle('w', 1)
         h.text = '[MEMORY HINT] inline lesson'
         h.ready.set()
         inst._pending_hint_job = h
-        msgs = []
-        eng._maybe_attach_inline_memory_hint(inst, msgs, msgs)
+        eng._maybe_attach_inline_memory_hint(inst, [], [])
 
-        # Exactly one append, the EXACT worker text, and as a SYSTEM (never USER) note.
-        assert len(eng.appended) == 1
-        _, msg = eng.appended[0]
-        assert msg.role == SYSTEM
-        assert msg.role != USER
-        assert msg.content == '[MEMORY HINT] inline lesson'
-        # Visible to the next action: in conversation AND the local llm_messages copy.
-        assert inst.conversation[-1].role == SYSTEM
-        assert msgs[-1].role == SYSTEM
+        # Queued to the notification queue with the EXACT worker text...
+        assert inst._tool_warnings == ['[MEMORY HINT] inline lesson']
+        # ...and NOT appended as a standalone message (R1: never a user msg).
+        assert inst.conversation == []
         # Claimed + ref cleared.
         assert h.owner == 'inline'
         assert inst._pending_hint_job is None
@@ -2970,7 +2991,7 @@ class TestBug0382SameTurn:
         eng._maybe_attach_inline_memory_hint(inst, [], [])
         delta = time.monotonic() - t0
 
-        assert eng.appended == []          # nothing attached this turn
+        assert inst._tool_warnings == []    # nothing queued this turn
         assert h.abandoned is True          # opt-out flag for the worker
         assert h.owner is None              # worker still queues deferred on completion
         assert inst._pending_hint_job is None
@@ -2985,7 +3006,7 @@ class TestBug0382SameTurn:
         h.ready.set()
         inst._pending_hint_job = h
         eng._maybe_attach_inline_memory_hint(inst, [], [])
-        assert eng.appended == []
+        assert inst._tool_warnings == []
         assert h.owner == 'inline'
         assert inst._pending_hint_job is None
 
@@ -2998,7 +3019,7 @@ class TestBug0382SameTurn:
         h.ready.set()
         inst._pending_hint_job = h
         eng._maybe_attach_inline_memory_hint(inst, [], [])
-        assert eng.appended == []
+        assert inst._tool_warnings == []
         assert h.owner is None              # not claimed by the wrong instance
         assert inst._pending_hint_job is h  # ref not cleared (returned before resolve)
 
@@ -3017,7 +3038,7 @@ class TestBug0382SameTurn:
         h.ready.set()
         inst._pending_hint_job = h
         eng._maybe_attach_inline_memory_hint(inst, [], [])
-        assert eng.appended == []
+        assert inst._tool_warnings == []
         assert inst.conversation == []
         assert h.owner is None              # guard returned before the lock — never claimed
 
@@ -3073,7 +3094,9 @@ class TestBug0382SameTurn:
         ready=True and claims inline) yield exactly ONE delivery — never neither.
         """
         mgr, inst = self._mgr_for_finalize(tmp_path)
-        eng = _InlineFakeEngine(SimpleNamespace(memory_hint_manager=mgr))
+        eng_pool = MagicMock(memory_hint_manager=mgr)
+        eng_pool.get_instance.return_value = inst  # inline + deferred share the instance
+        eng = _InlineFakeEngine(eng_pool)
         ainst = _AttachInst('w')
         h = HintHandle('w', 1)
         ainst._pending_hint_job = h
@@ -3083,15 +3106,13 @@ class TestBug0382SameTurn:
         assert inst._tool_warnings == []
         assert mgr._deferred_delivered == 0
 
-        # Peek runs after and, re-checking ready under the lock, claims INLINE.
+        # Peek runs after and, re-checking ready under the lock, claims INLINE → queues.
         eng._maybe_attach_inline_memory_hint(ainst, [], [])
-        assert len(eng.appended) == 1
-        assert eng.appended[0][1].content == '[MEMORY HINT] raced'
+        assert inst._tool_warnings == ['[MEMORY HINT] raced']
         assert h.owner == 'inline'
 
-        # Exactly one of {inline append} xor {deferred queue}.
-        total = len(eng.appended) + len(inst._tool_warnings)
-        assert total == 1
+        # Exactly one of {inline queue} xor {deferred queue} (both land on _tool_warnings).
+        assert len(inst._tool_warnings) == 1
         assert mgr._inline_delivered == 1
         assert mgr._deferred_delivered == 0
 
@@ -3101,13 +3122,14 @@ class TestBug0382SameTurn:
         deferred = []
         # Patch only the transport (not finalize) to count queued-deferred without pool wiring.
         mgr._deliver = lambda inst_, name_, txt, *, mode='deferred': deferred.append(txt)
-        eng = _InlineFakeEngine(SimpleNamespace(memory_hint_manager=mgr))
+        eng_pool = MagicMock(memory_hint_manager=mgr)
+        eng = _InlineFakeEngine(eng_pool)
 
         for _ in range(200):
             h = HintHandle('w', 1)
             ainst = _AttachInst('w')
             ainst._pending_hint_job = h
-            eng.appended = []
+            eng_pool.get_instance.return_value = ainst  # inline queues onto ainst
             deferred.clear()
 
             def worker():
@@ -3120,7 +3142,7 @@ class TestBug0382SameTurn:
             t2 = threading.Thread(target=peek)
             t1.start(); t2.start(); t1.join(); t2.join()
 
-            n_inline = len(eng.appended)
+            n_inline = len(ainst._tool_warnings)
             n_defer = len(deferred)
             assert n_inline + n_defer == 1, \
                 f'exactly one delivery expected, got inline={n_inline} deferred={n_defer}'

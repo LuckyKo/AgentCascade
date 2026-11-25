@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from agent_cascade.engine.helpers import _extract_direct_text_content
 from agent_cascade import settings
-from agent_cascade.llm.schema import ASSISTANT, SYSTEM, Message
+from agent_cascade.llm.schema import ASSISTANT
 from agent_cascade.log import logger
 
 # Justifications carried in the hint query. Deliberately small: the query is
@@ -75,7 +75,7 @@ class MemoryHintMixin:
                          getattr(instance, 'instance_name', '?'), e)
 
     def _maybe_attach_inline_memory_hint(self, instance, messages, llm_messages) -> None:
-        """Best-effort, NON-BLOCKING same-turn SYSTEM-note attach (BUG_0382 §4).
+        """Best-effort, NON-BLOCKING same-turn hint attach (BUG_0382 §4).
 
         Runs right after Phase 4 (response normalize + tool execution = the overlap
         window during which the worker computed the hint). Peeks the stashed handle ONCE:
@@ -84,14 +84,16 @@ class MemoryHintMixin:
         this is a turn-critical-path method and must never block.
 
         Outcomes (exactly one delivery, per §3.1):
-          - ready + non-empty text → claim 'inline', append it as a SYSTEM note
-            (NEVER a user message — R1) via the unified _append_and_log_to_llm helper.
-          - ready + empty text → claim 'inline' (no append) so the worker won't re-queue.
+          - ready + non-empty text → claim 'inline' and queue the hint onto the
+            instance's _tool_warnings via _queue_tool_warning (BUG_0410) — the SAME
+            [SYSTEM NOTIFICATIONS] drain the deferred path uses. NEVER a user message (R1).
+          - ready + empty text → claim 'inline' (no queue) so the worker won't re-queue.
           - not ready → mark abandoned; the worker queues it to the next turn (turn B).
           - already owned / no handle / stale instance → no-op.
 
-        ``messages`` is accepted for call-site parity with the submit hook; the note lands
-        in instance.conversation via _append_and_log_to_llm, not in the local copy.
+        ``messages`` / ``llm_messages`` are accepted for call-site parity with the submit
+        hook; the hint lands on instance._tool_warnings (drained into the next tool
+        result), not in the local conversation copy.
         Best-effort: the whole body is wrapped — it must never raise into the run loop.
         """
         try:
@@ -117,9 +119,11 @@ class MemoryHintMixin:
             # worker still holds it via the job dict it popped — harmless.
             instance._pending_hint_job = None
             if claim_text:
-                # Append OUTSIDE h.lock — never couple h.lock to _compression_lock (§8.3).
-                self._append_and_log_to_llm(
-                    instance, Message(role=SYSTEM, content=claim_text), llm_messages)
+                # Queue OUTSIDE h.lock — never couple h.lock to _compression_lock (§8.3).
+                # BUG_0410: ride the existing notification queue (the deferred path's
+                # [SYSTEM NOTIFICATIONS] drain) instead of a standalone SYSTEM message.
+                from agent_cascade.operation_manager.path_security import _queue_tool_warning
+                _queue_tool_warning(self.pool, instance.instance_name, claim_text)
                 mgr = getattr(self.pool, 'memory_hint_manager', None)
                 if mgr is not None:
                     # Counts ACTUAL deliveries: a ready-but-empty handle claims

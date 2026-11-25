@@ -188,6 +188,12 @@ class FakePool:
     def register_async_call(self, **kwargs):
         pass
 
+    def _compute_template_hash(self, template_name):
+        # find_or_create_instance stamps inst._soul_body_hash via this (refresh-souls
+        # staleness marker, ConfigPersistMixin). This test does not exercise soul refresh,
+        # so return None ("unknown vintage") — matches the real Optional[str] contract.
+        return None
+
 
 def _make_engine(pool, manager):
     """An engine stub whose ``_create_and_run_agent`` is the REAL

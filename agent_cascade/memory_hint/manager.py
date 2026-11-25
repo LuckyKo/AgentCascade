@@ -1601,8 +1601,10 @@ class MemoryHintManager:
         """Skill section of a combined hint ('' when empty). Skill names are short
         snake_case strings — no per-entry clipping needed.
 
-        BUG_0225: a skill hinted ≥3× this session (and not loaded) gets a concise
-        recurrence marker appended to its line, so repetition carries weight. The marker
+        BUG_0225: a skill hinted ≥3× recently (and not loaded) gets a concise
+        recurrence marker appended to its line, so repetition carries weight. "Recently"
+        tracks the per-skill counter, which now resets at L2-compaction boundaries (BUG_0409)
+        in addition to session reset, so it reflects in-context hints only. The marker
         is advisory-only text — it never changes the delivery mechanism (no user-message
         injection, preserving the e2e contract).
 
@@ -1626,7 +1628,7 @@ class MemoryHintManager:
         line = f"  - {n}"
         c = counts.get(n)
         if c is not None and c >= 3:
-            suffix = f"hinted {_ordinal(c)} time this session"
+            suffix = f"hinted {_ordinal(c)} time recently"
             if n.lower() not in loaded:
                 suffix += ', not loaded'
                 if c < autoload_threshold:

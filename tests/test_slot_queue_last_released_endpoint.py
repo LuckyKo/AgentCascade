@@ -53,6 +53,8 @@ def _make_child_pool(router):
       - ``api_router``       : the router under test — this is what _pool_ref must point at so that
                                release_slot_permit's _get_router_from_holder can recover it.
       - ``_resolve_instance_name`` / ``_update_child_relationship``: helpers the method calls.
+      - ``_compute_template_hash``: refresh-souls staleness marker (fresh path stamps
+        inst._soul_body_hash); return None = unknown vintage.
     A real AgentPool has NO ``.engine`` attribute — we never reference one.
     """
     return SimpleNamespace(
@@ -60,6 +62,10 @@ def _make_child_pool(router):
         api_router=router,
         _resolve_instance_name=lambda name: name,
         _update_child_relationship=lambda parent, name, add=True: None,
+        # Refresh-souls staleness marker: find_or_create_instance stamps inst._soul_body_hash
+        # via this (ConfigPersistMixin). The test does not exercise soul refresh, so return
+        # None ("unknown vintage") — matches the real Optional[str] contract.
+        _compute_template_hash=lambda name: None,
         # Reuse path (via _prepare_instance_for_reuse) reads these:
         _children_lock=threading.RLock(),
         # Fresh-registration path (lifecycle_manager.py:440-441) clears a stale termination

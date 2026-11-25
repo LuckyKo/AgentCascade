@@ -32,6 +32,23 @@ def _disable_stack_swap_gate(monkeypatch):
     monkeypatch.setattr('agent_cascade.settings.ENABLE_STACK_SWAP', False)
 
 
+@pytest.fixture(autouse=True)
+def _pin_inline_delivery(request, monkeypatch):
+    """Honour a per-class INLINE gate; the compiled settings default is now ON.
+
+    MEMORY_HINT_INLINE now defaults ON (same-turn inline delivery), so a matched hint can
+    be claimed on the inline completion handle instead of riding the tool-warning queue.
+    The tool-warning-delivery suites below pin INLINE = False to keep asserting the
+    deferred path deterministically. The inline-mode suite (TestMemoryHintSameTurnE2E)
+    opts out — it has no INLINE attr and monkeypatches INLINE=True per test. Classes
+    without an INLINE attr are left untouched.
+    """
+    gate = getattr(request.cls, 'INLINE', None)
+    if gate is None:
+        return
+    monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', gate)
+
+
 def _write_lesson(vault: Path, rel_path: str, name: str, description: str, body: str) -> None:
     p = vault / rel_path
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -43,6 +60,11 @@ def _write_lesson(vault: Path, rel_path: str, name: str, description: str, body:
 
 class TestMemoryHintE2E:
     """Drive the real run loop and assert the hint flows via the tool-warning queue."""
+
+    # Asserts tool-warning (deferred) delivery, so pin inline OFF under the now-ON
+    # default so the run loop doesn't claim the hint on the inline handle (see
+    # _pin_inline_delivery).
+    INLINE = False
 
     @staticmethod
     def _make_inst(max_turns):
@@ -335,7 +357,11 @@ class TestMemoryHintPoolStopResume:
     Pre-fix: the value=True branch called ``memory_hint_manager.stop()`` (worker dies),
     and the value=False branch never re-called ``start()`` — so the second job was never
     processed and this test FAILED. Post-fix: resume revives the worker → PASSES.
+
+    Delivery is asserted via the deferred (tool-warning) path, so pin inline OFF under the
+    now-ON default so delivery isn't claimed on the inline handle (see _pin_inline_delivery).
     """
+    INLINE = False
 
     @staticmethod
     def _make_pool_instance():
@@ -468,9 +494,9 @@ class TestMemoryHintSameTurnE2E:
 
     The unit tests (TestBug0382SameTurn) prove the handle/claim-race protocol in
     isolation; these prove the WIRING end-to-end: the Phase-3/4 submit hook stashes a
-    completion handle, the post-Phase-4 peek turns a ready handle into an in-conversation
-    SYSTEM note (never a user message — R1), an unfinished handle defers to the
-    tool-warning queue, and the peek never blocks the run.
+    completion handle, the post-Phase-4 peek turns a ready handle into a _tool_warnings
+    entry (the notification queue, BUG_0410 — never a user message, R1), an unfinished
+    handle defers to the same queue, and the peek never blocks the run.
     """
 
     # Reuse the sibling harness's static helpers without inheriting the test class
@@ -487,7 +513,7 @@ class TestMemoryHintSameTurnE2E:
 
         submit()'s put_nowait(job) runs _process_job on the CALLER (engine) thread, so the
         worker finishes BEFORE the post-Phase-4 peek → deterministic inline (same-turn) win.
-        The real matching + finalize + peek + _append_and_log_to_llm code all still runs;
+        The real matching + finalize + peek + _queue_tool_warning code all still runs;
         only the worker-thread handoff is removed. The stop() sentinel is routed to a
         private queue so the (still running) worker thread idle-ticks and never hangs.
         """
@@ -519,32 +545,32 @@ class TestMemoryHintSameTurnE2E:
     def _conv_roles(conv):
         return [m.role if isinstance(m, Message) else m.get('role', '') for m in conv]
 
-    def test_inline_same_turn_appends_system_note(self, tmp_path, monkeypatch):
-        """Worker finishes during Phase 4 → the hint lands THIS turn as a SYSTEM note.
+    def test_inline_same_turn_queues_tool_warning(self, tmp_path, monkeypatch):
+        """Worker finishes during Phase 4 → the hint lands THIS turn on _tool_warnings
+        (BUG_0410: the notification queue, NOT a standalone SYSTEM message in the
+        conversation).
 
-        Asserts: (a) a '[MEMORY HINT]' SYSTEM message is appended after the assistant reply
-        in the SAME turn, (b) it is SYSTEM and never USER (R1), (c) nothing is queued to the
-        deferred tool-warning queue (inline won the race)."""
+        Asserts: (a) a '[MEMORY HINT]' entry is queued to inst._tool_warnings in the
+        SAME turn, (b) NO '[MEMORY HINT]' message is ever in the conversation (R1: never
+        a user message), (c) it rides the same queue the deferred path uses."""
         monkeypatch.setattr('agent_cascade.settings.MEMORY_HINT_INLINE', True)
         engine, inst, pool, run, mgr = self._make_pool(tmp_path, max_turns=1).__next__()
         self._make_sync_processor(mgr)  # force worker to complete before the peek
         run()
 
-        roles = self._conv_roles(inst.conversation)
         contents = self._conv_contents(inst.conversation)
-        # The hint is in the conversation THIS turn...
-        hint_idx = next((i for i, c in enumerate(contents) if '[MEMORY HINT]' in str(c)), -1)
-        assert hint_idx != -1, f'expected an inline SYSTEM hint in conversation, got {contents}'
-        # ...as a SYSTEM message (never USER — invariant R1)...
-        assert roles[hint_idx] == SYSTEM, f'hint must be SYSTEM, got {roles[hint_idx]!r}'
-        assert 'compression-debug.md' in str(contents[hint_idx])
-        # ...and after the assistant reply it was generated from.
-        reply_idx = next(i for i, c in enumerate(contents) if 'reply 1' in str(c))
-        assert hint_idx > reply_idx, 'inline note must follow the assistant turn it augments'
-        assert USER not in [roles[i] for i, c in enumerate(contents)
-                            if '[MEMORY HINT]' in str(c)], 'R1: hint must never be a user msg'
-        # Inline won → nothing was deferred to the tool-warning queue.
-        assert inst._tool_warnings == [], f'inline win must not also queue deferred: {inst._tool_warnings}'
+        # The hint is queued to the notification queue THIS turn...
+        assert any('[MEMORY HINT]' in w for w in inst._tool_warnings), \
+            f'expected an inline hint queued to _tool_warnings, got {inst._tool_warnings}'
+        # ...and NOT appended as a standalone message in the conversation...
+        assert not any('[MEMORY HINT]' in str(c) for c in contents), \
+            f'inline hint must not be a standalone conversation message: {contents}'
+        # R1: the hint is never a user message. Any '[MEMORY HINT]' that appears in the
+        # conversation must be a non-user role (in practice none appear now — they ride
+        # _tool_warnings, drained into a tool result).
+        roles = self._conv_roles(inst.conversation)
+        hint_roles = [roles[i] for i, c in enumerate(contents) if '[MEMORY HINT]' in str(c)]
+        assert USER not in hint_roles, f'R1: hint must never be a user msg, got {hint_roles}'
 
     def test_deferred_when_worker_not_ready(self, tmp_path, monkeypatch):
         """Worker not finished at the peek → peek abandons; hint defers to turn-B queue.

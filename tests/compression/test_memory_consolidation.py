@@ -523,6 +523,67 @@ class TestConsolidateMarkersUnit:
                     assert len(marker_summaries) == expected_count, \
                         f"Expected {expected_count} summaries, got {len(marker_summaries)}"
 
+    def test_l2_consolidation_resets_skill_hint_counts(self):
+        """BUG_0409: an L2 roll-up discards the working set, so the per-skill hint
+        counter (``_skill_hint_counts``) must be reset at the L2 boundary — it should
+        reflect in-context hints only, not stale pre-compaction counts."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=8, msgs_between=2)
+        mock_inst = MagicMock()
+        mock_inst.conversation = history
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+        # Pre-populate the per-skill counter with a stale (pre-L2) count.
+        mock_inst._skill_hint_counts = {'stale_skill': 4, 'other_skill': 2}
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+        mock_pool.get_logger.return_value._consolidate_markers_in_jsonl.return_value = True
+
+        with patch('agent_cascade.agent_pool.AgentPool') as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+            with patch('agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD', 5):
+                with patch(
+                    'agent_cascade.compression.agent_invoker.invoke_consolidation_agent'
+                ) as mock_invoke:
+                    mock_invoke.return_value = ('Consolidated', '')
+                    _consolidate_markers(mock_pool, 'TestAgent')
+
+        # L2 succeeded (rebuild ran) → the stale per-skill counter is reset.
+        assert mock_inst.rebuild_conversation.called
+        assert mock_inst._skill_hint_counts == {}
+
+    def test_l2_skip_preserves_skill_hint_counts(self):
+        """BUG_0409 guard: when consolidation is skipped (marker count below
+        threshold), the per-skill counter must NOT be reset — only a *successful*
+        L2 roll-up (which discards the working set) zeroes it."""
+        from agent_cascade.compression.core import _consolidate_markers
+
+        history = _build_history_with_markers(num_markers=3, msgs_between=2)
+        mock_inst = MagicMock()
+        mock_inst.conversation = history
+        mock_inst._compression_lock = threading.Lock()
+        mock_inst.rebuild_conversation = MagicMock()
+        mock_inst._skill_hint_counts = {'stale_skill': 4}
+
+        mock_pool = MagicMock()
+        mock_pool.get_instance.return_value = mock_inst
+
+        with patch('agent_cascade.agent_pool.AgentPool') as MockAgentPoolClass:
+            MockAgentPoolClass.find_all_marker_indices.side_effect = lambda h: [
+                i for i, m in enumerate(h) if _is_compression_marker(m)
+            ]
+            # Threshold 5 > 3 markers → Phase-1 guard returns early (no L2 roll-up).
+            with patch('agent_cascade.settings.COMPRESSION_CONSOLIDATION_THRESHOLD', 5):
+                _consolidate_markers(mock_pool, 'TestAgent')
+
+        # Skipped → rebuild never ran → the counter is untouched.
+        assert not mock_inst.rebuild_conversation.called
+        assert mock_inst._skill_hint_counts == {'stale_skill': 4}
+
     def test_pool_mutation_preserves_raw_segments(self):
         """Consolidation should only remove markers, never raw messages between them."""
         from agent_cascade.compression.core import _consolidate_markers

@@ -522,8 +522,10 @@ class AgentInstance:
     # Vault-relative paths of lessons already read via read_file; never re-hint a
     # memory in this set. All six fields below are mutated under _compression_lock; all
     # but _skill_hint_counts are reset by _reset_memory_hint_state() (L1/L2 compression
-    # + session reset). The session-scoped _skill_hint_counts counter is cleared only by
-    # reset_conversation() (the true session boundary), so it survives compression.
+    # + session reset). _skill_hint_counts is the exception: it is cleared by
+    # reset_conversation() (the true session boundary) AND at the L2-compaction boundary
+    # (compression/core.py _consolidate_markers, BUG_0409) — NOT by _reset_memory_hint_state(),
+    # which also runs on L1 (which retains a tail where the counts stay valid).
     _memories_read: set = field(default_factory=set)
     # Vault-relative path -> last-hint monotonic timestamp (cooldown guard).
     _recently_hinted: dict = field(default_factory=dict)
@@ -534,10 +536,11 @@ class AgentInstance:
     _recently_skill_hinted: dict = field(default_factory=dict)
     # Last turn a skill hint was issued (diagnostics; mirrors _last_memory_hint_turn).
     _last_skill_hint_turn: int = field(default=-1)
-    # Per-session count of how many times each skill name has been hinted (BUG_0225:
-    # recurrence marker on the skill-hint block). SESSION-scoped (the marker says
-    # "this session"), so it is reset ONLY by reset_conversation() — NOT by
-    # _reset_memory_hint_state(), which also runs on within-session compression.
+    # Count of how many times each skill name has been hinted (BUG_0225: recurrence marker
+    # on the skill-hint block). Tracks IN-CONTEXT hints: reset by reset_conversation()
+    # (session boundary) AND at the L2-compaction boundary (compression/core.py
+    # _consolidate_markers, BUG_0409) — NOT by _reset_memory_hint_state(), which also runs
+    # on L1 (which retains a tail where the counts stay valid).
     _skill_hint_counts: dict = field(default_factory=dict)
     # BUG_0382: same-turn delivery completion handle, set by the Phase-3/4 submit hook
     # and read by the post-Phase-4 peek. ENGINE-THREAD-ONLY state (read/written on the
@@ -851,11 +854,11 @@ class AgentInstance:
                 self._last_memory_hint_turn = -1
                 self._recently_skill_hinted = {}
                 self._last_skill_hint_turn = -1
-                # NOTE: _skill_hint_counts is intentionally NOT reset here. It is
-                # SESSION-scoped (BUG_0225 recurrence marker says "this session"), whereas
-                # this method also runs on L1/L2 compression (a within-session compaction).
-                # Resetting it on compression would make the "this session" wording false.
-                # It is reset only by reset_conversation() (the true session boundary).
+                # NOTE: _skill_hint_counts is intentionally NOT reset here. It tracks
+                # in-context hints and is reset at the L2-compaction boundary (core.py
+                # _consolidate_markers, BUG_0409) and by reset_conversation() (session
+                # boundary) — but NOT here, because this method also runs on L1 (which
+                # retains a tail where the counts stay valid).
         except Exception as e:  # noqa: BLE001 — best-effort, never affect the caller
             logging.getLogger(__name__).debug('[MEMORY_HINT] _reset_memory_hint_state failed: %s', e)
 

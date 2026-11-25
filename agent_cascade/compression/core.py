@@ -560,6 +560,15 @@ def _consolidate_markers(
                 logger.error(f"Pool mutation during consolidation failed for '{target_agent_name}': {e}")
                 return
 
+            # BUG_0409: L2 roll-up discards the working set that produced the per-skill hint
+            # counts, so _skill_hint_counts ("skill X hinted N times") is now stale and would
+            # over-suppress re-hints for skills whose earlier hints were just rolled into this
+            # marker. Reset it at the L2 boundary — under the same _compression_lock guarding
+            # the pool mutation — so the counter reflects in-context hints only. L1 clean-trim
+            # keeps a tail and deliberately does NOT reset it (see
+            # AgentInstance._reset_memory_hint_state).
+            target_inst._skill_hint_counts = {}
+
         # ── Phase 4: Sync logger (outside lock, non-fatal) ──
         try:
             log_inst = agent_pool.get_logger(target_agent_name, target_inst.agent_class)
