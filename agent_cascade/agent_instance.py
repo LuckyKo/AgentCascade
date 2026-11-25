@@ -586,27 +586,12 @@ class AgentInstance:
     def append_message(self, message: Message) -> None:
         """Append a single message. Updates cached lists atomically.
 
-        Update Schema Operation: add message/tool response/user msg (append)
-        Cache Behavior:
-            - _cached_messages: EXTEND with new message
-            - _cached_llm_messages: EXTEND with new message
-            - _last_token_count_conversation_length: INVALIDATE (-1)
-            - Working set cache: PRESERVED (no rebuild needed)
+        Delegates to :meth:`append_messages` (single-element batch) so the
+        timestamp-stamp / extend / invalidate logic lives in exactly one place.
 
-        Thread Safety: Uses _compression_lock for atomic update
+        Thread Safety: Uses _compression_lock (via append_messages) for atomic update
         """
-        with self._compression_lock:
-            # Stamp a real completion timestamp (unix seconds) at commit time.
-            # Stored in the declared Message.ts field, which is excluded from all
-            # model dumps (exclude=True), so it can never leak into LLM payloads on
-            # any backend. Idempotent: re-appending the same object must not reset
-            # an existing ts.
-            if message.ts is None:
-                message.ts = time.time()
-            self.conversation.append(message)
-            self._cached_messages.append(message)
-            self._cached_llm_messages.append(message)
-            self._last_token_count_conversation_length = -1
+        self.append_messages([message])
 
     def append_messages(self, messages: List[Message]) -> None:
         """Append multiple messages. Same as append_message but batched for efficiency.
@@ -863,19 +848,6 @@ class AgentInstance:
         except Exception as e:  # noqa: BLE001 — best-effort, never affect the caller
             logging.getLogger(__name__).debug('[MEMORY_HINT] _reset_memory_hint_state failed: %s', e)
 
-    def clear_working_set_cache(self) -> None:
-        """Clear working set cache without touching conversation.
-
-        Used when cached lists may be out of sync (e.g., after direct mutation
-        bypassing this API).
-
-        Thread Safety: Uses _compression_lock for atomic update
-        """
-        with self._compression_lock:
-            self._cached_messages.clear()
-            self._cached_llm_messages.clear()
-            self._last_token_count_conversation_length = -1
-
     def _transition(self, new_state: AgentState) -> None:
         """Transition to a new state with validation.
 
@@ -913,28 +885,6 @@ class AgentInstance:
         """
         with self._state_lock:
             return self.state == AgentState.RUNNING
-
-    def is_executing(self) -> bool:
-        """Alias for is_running, provided for code clarity in some contexts.
-
-        Thread-safe: reads self.state under _state_lock protection.
-
-        Returns:
-            bool: True if agent is actively processing (RUNNING state).
-        """
-        with self._state_lock:
-            return self.state == AgentState.RUNNING
-
-    def get_state_name(self) -> str:
-        """Return the current agent state as a string (e.g., "RUNNING", "IDLE").
-
-        Thread-safe: reads self.state under _state_lock protection.
-
-        Returns:
-            str: The name of the current AgentState enum value.
-        """
-        with self._state_lock:
-            return self.state.name
 
     def terminate(self) -> None:
         """Mark this instance as terminated and clean up volatile state.
@@ -986,7 +936,6 @@ class AgentInstance:
                 pool_ref.api_router.scheduler.terminate_for_agent(self.instance_name)
         except Exception as e:
             # Non-critical — termination itself succeeded.
-            import logging
             logging.getLogger(__name__).debug(
                 f"[TERMINATION] Failed to clean up queue entries for {self.instance_name}: {e}")
 
