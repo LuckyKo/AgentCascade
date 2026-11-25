@@ -78,8 +78,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
     lifecycles: file I/O, background threads).
     """
 
-    # BUG_0029 Phase 2: auto_security is a class-level property delegating to the
-    # process-level runtime_state.state singleton (single owner of UI-settable state).
+    # Auto_security is a class-level property delegating to the process-level
+    # runtime_state.state singleton (single owner of UI-settable state).
     @property
     def auto_security(self) -> bool:
         return _runtime_state.auto_security
@@ -147,7 +147,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # ── Core registries (owned directly) ─────────────────────────────────
         self.instances: Dict[str, AgentInstance] = {}  # instance_name → AgentInstance
         self.templates: Dict[str, Assistant] = {}  # agent_class → template
-        # BUG_0235: soul-file bookkeeping for mtime-based template invalidation.
+        # Soul-file bookkeeping for mtime-based template invalidation.
         # `templates` is a startup cache filled once by _discover_agents(); with no
         # invalidation path, a soul edited on disk is NEVER served to agents spawned
         # later in the same process (no explicit refresh/restart). These two dicts let
@@ -174,7 +174,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         # ── PoolSettings persistence ────────────────────────────────────────
         self._pool_settings_path = self.api_router._config_dir / instance_scoped_filename('pool_settings')
         self._settings_save_lock = threading.Lock()  # guards concurrent save operations
-        # BUG_0029 Phase 2: seeds runtime_state.state.auto_security through the class-level
+        # Seeds runtime_state.state.auto_security through the class-level
         # property (assignment channel — no persistence). Must stay BEFORE _load_pool_settings()
         # so the load path can write through it.
         self.auto_security = True
@@ -281,7 +281,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         self._stopped_event = threading.Event()  # M3 fix: stopped flag for emergency shutdown
         self._shutdown_done = False  # idempotency guard for the terminal shutdown() teardown
 
-        # ── Stack swap (BUG_0323 S4) — gated, absent when ENABLE_STACK_SWAP is off ──
+        # ── Stack swap — gated, absent when ENABLE_STACK_SWAP is off ──
         # _pending_swap_event is the turn-boundary latch: set by park_active_stack to
         # make each in-flight run loop stop at its next turn boundary (run_loop.py).
         # Created lazily under the swap feature flag so the off-path pool is byte-identical
@@ -289,7 +289,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         if settings.ENABLE_STACK_SWAP:
             self._pending_swap_event = threading.Event()
 
-        # ── Version counter for lazy sync of instance_conversations (Fix #3) ──
+        # ── Version counter for lazy sync of instance_conversations ──
         self._instances_version = 0  # increments on create/remove/dismiss/reset
         self._mapping_synced_to_version = -1  # tracks last version instance_conversations was synced to
 
@@ -440,7 +440,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             self.memory_hint_manager = MemoryHintManager(self)
             if (self.llm_cfg or {}).get('memory_hint_enabled', False):
                 self.memory_hint_manager.start()
-                # BUG_0310 R2: rescan is backgrounded; see MemoryHintManager.rescan_vaults_background()
+                # Rescan is backgrounded; see MemoryHintManager.rescan_vaults_background()
                 # for the single-source-of-truth empty-window invariant.
                 self.memory_hint_manager.rescan_vaults_background()
                 # Kickoff only — the vault walk is backgrounded, so this times the thread
@@ -691,7 +691,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         logger.debug('Pool shutdown complete (work threads joined, ZMQ clients drained)')
 
     def set_auto_security(self, enabled: bool) -> None:
-        """BUG_0029 Phase 2: the single writer for auto-security mode.
+        """The single writer for auto-security mode.
 
         Thin delegate to ``runtime_state.state.set_auto_security`` (the toggle channel),
         wrapped with change-detection and persistence: saves pool settings ONLY when the
@@ -762,7 +762,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         try:
             template = load_agent_template(self, name, llm_cfg)
             # Register via _register_template so the soul mtime is recorded atomically
-            # for BUG_0235 mtime invalidation. If the soul file doesn't exist (synthetic
+            # for mtime invalidation. If the soul file doesn't exist (synthetic
             # default-prompt template) no watch source is recorded and get_template skips
             # the staleness check for it.
             self._register_template(name, template, self.agents_dir / f'{name}_soul.md')
@@ -813,7 +813,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
     # ── Agent discovery (unchanged from existing implementation) ───────────
 
     def _register_template(self, name: str, template: Assistant, soul_path: Optional[Path]):
-        """Single mutation point for self.templates + BUG_0235 soul bookkeeping.
+        """Single mutation point for self.templates + soul bookkeeping.
 
         Registers `template` under `name` and records the soul file's mtime for
         mtime-based invalidation, atomically under _template_lock so get_template()
@@ -849,7 +849,7 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
 
         Mirrors the old AgentPool._discover_agents() — scans for *_soul.md files
         and loads each one via load_agent_template(). Each template is registered
-        through _register_template() so its soul mtime is recorded for BUG_0235
+        through _register_template() so its soul mtime is recorded for
         on-disk invalidation.
         """
         from agent_cascade.agent_factory import load_agent_template
@@ -964,12 +964,12 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                      agent_selected: bool = False) -> tuple:
         """Inject *skill_name*'s full instructions into *agent_name*'s conversation as a
         USER message — the single source of truth shared by the ``load_skill`` tool and
-        the memory-hint auto-loader (BUG_0263).
+        the memory-hint auto-loader.
 
         Args:
             agent_selected: When True, this inject is a DELIBERATE choice (the
-                ``load_skill`` tool), so the load also bumps ``agent_selected_loads``
-                (BUG_0356). The memory-hint auto-loader leaves it False (harness-driven).
+                ``load_skill`` tool), so the load also bumps ``agent_selected_loads``.
+                The memory-hint auto-loader leaves it False (harness-driven).
 
         Performs the whole per-skill job: resolve instance + ``skill_manager`` ->
         ``load_full_instructions`` -> re-activate a previously-disabled skill -> dedup
