@@ -1020,12 +1020,11 @@ class SkillManager:
             final_active = active_before
             info_last = info  # last iteration's fresh classification (for the audit log below)
 
-            # Cache mode (BUG_0404 Phase 2): when the task-aware skill cache is on, cache_evict_tick
-            # OWNS eviction/sizing — the legacy rebalance absolute-gate + cap-draw must NOT run in
-            # parallel and one-way-ratchet USELESS/UNPROVEN away (plan §2.4 "repurpose the rebalance
-            # thread"; §2.6: USELESS/UNPROVEN are no longer auto-evictors, BAD is handled by the
-            # prefetch veto). Captured once here. False (inert) when the cache is OFF → the OFF path
-            # below is byte-identical. Re-enable stays the rebalance's responsibility.
+            # When the task-aware skill cache is on, cache_evict_tick owns eviction/sizing, so the
+            # legacy rebalance absolute-gate + cap-draw must NOT run in parallel and one-way-ratchet
+            # USELESS/UNPROVEN away (the cache's prefetch veto handles BAD; USELESS/UNPROVEN are not
+            # auto-evictors under cache mode). Captured once here; False (inert) when the cache is
+            # OFF → the OFF path below is byte-identical. Re-enable stays rebalance's responsibility.
             cache_owns_eviction = self._cache_enabled()
 
             for iteration in range(1, max_iterations + 1):
