@@ -1,6 +1,6 @@
 """BUG_0353 — fatal-exception hardening: unhandled exceptions become diagnosable.
 
-Light smoke test for the two observability hooks added to ``start_api_server.py``:
+Light smoke tests for the observability hooks added to ``start_api_server.py``:
 
   (a) the ``sys.excepthook`` wrapper (``_install_fatal_excepthook``) records an
       unhandled main-thread exception to the AC logger at CRITICAL with a
@@ -8,14 +8,20 @@ Light smoke test for the two observability hooks added to ``start_api_server.py`
   (b) the asyncio exception handler (``_ac_asyncio_exception_handler``, armed by
       ``_ac_serve_with_handler``) records an unhandled *task* exception (raised in a
       task and never awaited — the silent-death signature) at CRITICAL with a
-      ``[FATAL] unhandled asyncio exception`` marker.
+      ``[FATAL] unhandled asyncio exception`` marker;
+  (c) the stderr tee (``_install_stderr_tee``) copies stderr to
+      ``logs/server_stderr.log`` so a crash on a non-``start.bat`` launch path is
+      diagnosable, while leaving an already-redirected stderr (the ``start.bat``
+      path) untouched to avoid double writes.
 
-Both hooks resolve the LIVE ``agent_cascade.log.logger`` at call time, so the test
-monkeypatches that module global to a temp capturing logger — no ``init_logging()``,
-no real handlers, no production log files touched.
+Hooks (a)/(b) resolve the LIVE ``agent_cascade.log.logger`` at call time, so the
+test monkeypatches that module global to a temp capturing logger — no
+``init_logging()``, no real handlers, no production log files touched. Hooks (c)
+write to a real file under a ``tmp_path``, never the production ``logs/``.
 """
 import asyncio
 import gc
+import io
 import logging
 import sys
 
@@ -104,3 +110,50 @@ def test_asyncio_handler_logs_unhandled_task_exception(capture_logger):
              if '[FATAL] unhandled asyncio exception' in r.getMessage()]
     assert fatal, 'expected a [FATAL] unhandled asyncio exception CRITICAL record'
     assert all(r.levelno == logging.CRITICAL for r in fatal)
+
+
+def test_stderr_tee_writes_to_log_and_keeps_console(tmp_path, monkeypatch):
+    """(c) After _install_stderr_tee(), a write to sys.stderr lands in BOTH the
+    original stream AND logs/server_stderr.log — the capture tees, never replaces."""
+    (tmp_path / 'logs').mkdir()
+    # Target file becomes <tmp_path>/logs/server_stderr.log (PROJECT_ROOT-relative).
+    monkeypatch.setattr(sas, 'PROJECT_ROOT', str(tmp_path))
+    sink = io.StringIO()                 # stand-in console stderr (NOT the capture file)
+    monkeypatch.setattr(sys, 'stderr', sink)
+
+    sas._install_stderr_tee()
+    assert sys.stderr is not sink, 'stderr must be wrapped, not left untouched'
+
+    print('BUG0353_TEE_MARKER', file=sys.stderr)
+    sys.stderr.flush()
+
+    captured = (tmp_path / 'logs' / 'server_stderr.log').read_text(encoding='utf-8')
+    assert 'BUG0353_TEE_MARKER' in captured, 'marker must land in the capture file'
+    assert 'BUG0353_TEE_MARKER' in sink.getvalue(), \
+        'the original stream must still receive it (tee, not replace)'
+
+    sys.stderr._file.close()             # release the tmp handle before teardown
+
+
+def test_stderr_tee_noop_when_stderr_already_redirected(tmp_path, monkeypatch):
+    """(d) When sys.stderr is already the capture file (the start.bat path, where
+    fd 2 -> logs/server_stderr.log), the tee is a NO-OP: stderr is left untouched
+    and each write reaches the file exactly once (no double write)."""
+    log_path = tmp_path / 'logs' / 'server_stderr.log'
+    log_path.parent.mkdir()
+    # Make the target path == the open file so samefile detection trips.
+    monkeypatch.setattr(sas, 'PROJECT_ROOT', str(tmp_path))
+
+    fh = open(log_path, 'a', encoding='utf-8')
+    monkeypatch.setattr(sys, 'stderr', fh)
+    before = sys.stderr
+
+    sas._install_stderr_tee()
+    assert sys.stderr is before, 'already-redirected stderr must be left untouched'
+
+    print('BUG0353_NOOP_MARKER', file=sys.stderr)
+    fh.flush()
+    text = log_path.read_text(encoding='utf-8')
+    assert text.count('BUG0353_NOOP_MARKER') == 1, \
+        'the write must reach the file exactly once (no tee double-write)'
+    fh.close()

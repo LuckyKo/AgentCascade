@@ -224,6 +224,87 @@ def _install_fatal_excepthook():
     _FATAL_EXCEPTHOOK_INSTALLED = True
 
 
+class _StderrTee:
+    """Write-through stderr wrapper for in-process BUG_0353 forensic capture.
+
+    Forwards every write to BOTH the original stderr stream AND a line-buffered
+    log handle, so an unhandled crash on a launch path that does NOT redirect
+    fd 2 (direct ``python``, a debugger, an IDE) is still diagnosable from
+    ``logs/server_stderr.log``. The original stream is never suppressed. Unknown
+    attributes (isatty, fileno, encoding, ...) are delegated to the original so
+    callers like uvicorn/the splash keep working.
+    """
+
+    def __init__(self, original, log_handle):
+        self._original = original
+        self._file = log_handle
+
+    def write(self, data):
+        n = self._original.write(data)   # never drop the real stream
+        try:
+            self._file.write(data)
+            self._file.flush()           # flush per write so a hard kill loses nothing
+        except Exception:
+            pass                         # capture must never break the caller (disk full, ...)
+        return n
+
+    def flush(self):
+        try:
+            self._original.flush()
+        finally:
+            try:
+                self._file.flush()
+            except Exception:
+                pass
+
+    def writable(self):
+        return True
+
+    def __getattr__(self, name):
+        # Delegate everything else to the original stream (isatty/fileno/encoding...).
+        return getattr(self._original, name)
+
+
+def _install_stderr_tee():
+    """Tee sys.stderr to ``logs/server_stderr.log`` (BUG_0353 forensic gap).
+
+    start.bat already redirects fd 2 to that file at the OS level, but every OTHER
+    launch path sends stderr to a console that is lost on a hard crash. This tees
+    stderr to the same file so the crash signature is captured on EVERY path.
+
+    Self-disabling on the start.bat path: if stderr is already redirected to the
+    capture file (detected via os.path.samefile, or a ``server_stderr.log`` name
+    suffix when the fd can't be stat'd), it is left untouched to avoid double
+    writes. On any setup failure a one-line warning is written to the original
+    stderr and stderr is left unchanged — logging setup must never crash the server.
+    """
+    try:
+        if isinstance(sys.stderr, _StderrTee):   # already teed (idempotent)
+            return
+        log_path = os.path.join(PROJECT_ROOT, 'logs', 'server_stderr.log')
+        orig = sys.stderr
+        orig_name = getattr(orig, 'name', None)
+        if orig_name:
+            try:
+                if os.path.samefile(orig_name, log_path):
+                    return                       # start.bat path: already redirected
+            except (OSError, ValueError):
+                pass
+            if str(orig_name).endswith('server_stderr.log'):
+                return                           # fd 2 -> file we can't stat by path
+
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handle = open(log_path, 'a', encoding='utf-8', errors='backslashreplace',
+                      buffering=1)  # buffering=1 == line-buffered text (flush per line)
+        sys.stderr = _StderrTee(orig, handle)
+    except Exception as e:
+        # Graceful degradation: never crash the server over logging setup.
+        try:
+            sys.stderr.write(f'[WARN] stderr tee disabled: {e}\n')
+        except Exception:
+            pass
+
+
 def initialize_agents():
     """Set up agents, pool, and config. Returns (all_agents, agent_pool, chatbot_config)."""
     logger.info('Initializing Agent Orchestrator (API Server)...')
@@ -265,6 +346,11 @@ if __name__ == '__main__':
     # logged to console.log at CRITICAL before the original hook runs. Inert on the
     # normal boot path (only fires on an unhandled exception).
     _install_fatal_excepthook()
+
+    # BUG_0353: tee stderr to logs/server_stderr.log so a crash launched outside
+    # start.bat (direct python/debugger/IDE) is diagnosable. Independent of the
+    # excepthook above; no-op when fd 2 is already redirected there (start.bat).
+    _install_stderr_tee()
 
     # Startup splash (ASCII banner with version + URL). Additive: runs after logging is
     # up so it also lands in console.log. Non-TTY / AGENT_CASCADE_NO_BANNER → one-liner.
