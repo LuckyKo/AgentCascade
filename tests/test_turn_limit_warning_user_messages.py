@@ -61,6 +61,12 @@ class _FakeSkillManager:
         # (core.py now passes the live pool.settings value); the fake ignores it.
         return '[AUTO-SKILL] Reflect on your completed task and propose any reusable skill.'
 
+    def _cache_enabled(self):
+        # core.py _consume_turn calls sm._cache_enabled(); the real method (skills/manager.py)
+        # falls back to the compiled default (skill cache OFF) when no pool/config exists, so
+        # the pool-less fake mirrors that by returning False.
+        return False
+
 
 # ── Harness (mirrors test_auto_continue_turn_budget.py) ──────────────────────
 

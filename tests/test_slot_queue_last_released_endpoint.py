@@ -62,6 +62,11 @@ def _make_child_pool(router):
         _update_child_relationship=lambda parent, name, add=True: None,
         # Reuse path (via _prepare_instance_for_reuse) reads these:
         _children_lock=threading.RLock(),
+        # Fresh-registration path (lifecycle_manager.py:440-441) clears a stale termination
+        # marker under the pool lock; mirror the real AgentPool RLock + set so the fresh path
+        # executes rather than crashing on a missing attribute.
+        _pool_lock=threading.RLock(),
+        terminated_instances=set(),
     )
 
 

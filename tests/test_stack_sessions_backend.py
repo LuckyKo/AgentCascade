@@ -546,8 +546,10 @@ def test_restart_autosave_called(tmp_path, monkeypatch):
     monkeypatch.setattr(snapshot, 'snapshot_stack',
                         lambda pool, *a, **kw: order.append('snapshot'))
     import agent_cascade.server_restart as sr
+    # ws_handlers.handle_restart_server calls restart_server_process(before_reexec=...)
+    # (BUG_0400c telemetry pre-reexec flush) — the double must accept that kwarg.
     monkeypatch.setattr(sr, 'restart_server_process',
-                        lambda: order.append('restart'))
+                        lambda **kw: order.append('restart'))
 
     pool, _ = _single_root_pool(tmp_path)
     h, _b = _make_handler(pool)

@@ -138,6 +138,9 @@ class FakePool:
 
     def __init__(self):
         self.instances = {}
+        # child_runner.py:171 / lifecycle_manager.py access pool.terminated_instances
+        # directly (BUG_0405 termination-signal set) — the double must carry it.
+        self.terminated_instances = set()
         self.instance_classes = {}
         self._execution = MagicMock()
         self._execution._state_lock = threading.RLock()
