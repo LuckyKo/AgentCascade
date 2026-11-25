@@ -293,3 +293,19 @@ def test_extract_task_block_unit():
         'I emitted a [TASK]…[END] block. Then more prose [TASK]…[END] again. '
         '[TASK] Close out the loose ends [END]'
     ) == 'Close out the loose ends'
+
+
+def test_extract_task_block_content_mentions_marker():
+    """A [TASK]…[END] block whose CONTENT mentions [TASK] is extracted correctly as
+    block-only: the lazy regex isolates the block and preserves the content verbatim
+    (including the [TASK] mention). This is the edge case a naive '[TASK] in candidate'
+    leak detector would false-positive on — a correctly-extracted task can legitimately
+    contain [TASK]."""
+    from agent_cascade.child_runner import _extract_task_block
+
+    # the block's content mentions [TASK]; the lazy regex isolates the block and
+    # preserves the content verbatim (the [TASK] mention is part of the task text)
+    out = _extract_task_block('[TASK] Follow the [TASK]...[END] format [END]')
+    assert out == 'Follow the [TASK]...'
+    # a no-block message falls back to the whole message (the safety net)
+    assert _extract_task_block('no markers here') == 'no markers here'

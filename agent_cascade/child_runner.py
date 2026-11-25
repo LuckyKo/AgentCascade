@@ -44,6 +44,14 @@ def _extract_task_block(output: str) -> str:
     matches = _AFK_TASK_BLOCK_RE.findall(output)
     if matches:
         return matches[-1].strip()
+    # No [TASK]…[END] block: the Admin skipped the block, or the block lives in a
+    # different message than the one extracted (BUG_0406 root-cause candidate A).
+    # Log the (truncated) output for offline diagnosis, then fall back to the whole
+    # message so the dispatch still posts a usable task.
+    logger.warning(
+        '[AFK-ADMIN] _extract_task_block: no [TASK] block in extracted text; '
+        'whole-message fallback (possible BUG_0406 candidate-A). output=%.200r',
+        output)
     return output.strip()
 
 
