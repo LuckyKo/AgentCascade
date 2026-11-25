@@ -843,9 +843,10 @@ class AgentInstance:
         the WHOLE read-set + cooldown map (not a reconstruction of which files were
         in the compressed window — see plan §5.3), including the skill-hint cooldown
         state (_recently_skill_hinted / _last_skill_hint_turn, feature:
-        skills-in-memory-hints). The session-scoped _skill_hint_counts is deliberately
-        EXCLUDED (see NOTE in the reset block below) — it is cleared only by
-        reset_conversation(). Best-effort: never raises.
+        skills-in-memory-hints). The in-context _skill_hint_counts is deliberately
+        EXCLUDED (see NOTE in the reset block below) — it is cleared by
+        reset_conversation() (session boundary) AND at the L2-compaction boundary
+        (core.py _consolidate_markers, BUG_0409). Best-effort: never raises.
         """
         try:
             with self._compression_lock:
