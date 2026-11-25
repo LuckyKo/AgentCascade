@@ -2352,7 +2352,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             return {'session': {}, 'configs': [], 'agent_classes': [], 'skills': [],
                     'skill_cache': {}, 'recent_events': [], 'hints': {'hint_stats': {}, 'skill_table': []},
                     'evolution': _empty_skill_evolution_slice()}
-        session = agent_pool.telemetry.get_session_summary()
+        sess_summary = agent_pool.telemetry.get_session_summary()
         # BUG_0311 "hints" slice — read-only aggregation, no new counters, no schema
         # change. hint_stats = the hint subset of get_session_summary(); skill_table =
         # per-skill {skill, hints, loads, action_rate} from skill_manager.get_metrics(),
@@ -2362,7 +2362,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # action_rate=loads/hints is an approximation of hint effectiveness, not a strict
         # per-hint hit rate. Best-effort: any hiccup degrades to empty so the panel never
         # blanks.
-        hint_stats = {k: session.get(k) for k in (
+        hint_stats = {k: sess_summary.get(k) for k in (
             'total_hints_posted', 'hint_memory_entries', 'hint_skill_entries',
             'total_hint_chars', 'total_memories_actioned', 'memory_action_rate',
         )}
@@ -2386,7 +2386,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             skill_table = []
             evo_slice = _empty_skill_evolution_slice()
         return {
-            'session': session,
+            'session': sess_summary,
             'configs': agent_pool.telemetry.get_config_comparison(),
             'agent_classes': agent_pool.telemetry.get_agent_class_summary(),
             'skills': agent_pool.telemetry.get_skill_usage_summary(),
