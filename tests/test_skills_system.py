@@ -22,7 +22,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from agent_cascade.skills.manager import SkillManager
+from agent_cascade.skills.manager import (SkillManager, _default_metrics_entry, ORIGIN_DEMAND,
+                                          ORIGIN_PROBATION, REASON_CACHE, REASON_MANUAL)
 from agent_cascade.tools.custom.load_skill import LoadSkill
 from tests.conftest import make_hermetic_skill_manager  # shared hermetic factory (test isolation)
 from agent_cascade.skills.matcher import SkillMatcher
@@ -4964,3 +4965,183 @@ class TestConvergenceLoop:
         # the pool converged exactly onto the value-driven floor (50 useful actives + the re-enabled one).
         assert s['evict_threshold'] == 51
         assert s['target'] == 51
+
+
+# ===========================================================================
+# Task-aware skill cache (BUG_0404 Phase 2) — shadow-mode, gated
+# ===========================================================================
+
+def _cache_pool(**cfg):
+    """Fake pool exposing an llm_cfg dict so SkillManager._cache_enabled/_cache_num read live config."""
+    base = {'skill_cache_active_enabled': True}
+    base.update(cfg)
+    return SimpleNamespace(llm_cfg=base)
+
+
+def _cache_active_entry(origin=None, prefetched_turn=None, last_load_turn=None):
+    """An active metrics entry with the cache fields set explicitly (so victim order is deterministic)."""
+    e = _default_metrics_entry('active')
+    e['origin'] = origin
+    e['prefetched_turn'] = prefetched_turn
+    e['last_load_turn'] = last_load_turn
+    return e
+
+
+class _CacheRec:
+    """Records skill-cache boundary calls without touching real state (root-only guard test)."""
+    def __init__(self):
+        self.calls = []
+
+    def _cache_enabled(self):
+        return True
+
+    def bump_activity_turn(self):
+        pass
+
+    def prefetch_for_task(self, task_text, *, commit=False):
+        self.calls.append(('prefetch', task_text))
+
+    def cache_evict_tick(self, *, commit=False):
+        self.calls.append(('evict',))
+
+
+class TestSkillCachePhase2:
+    def test_probation_promoted_to_demand_on_deliberate_load(self, tmp_path):
+        """A deliberate load (agent_selected=True) 'confirms' a prefetched probation skill: it
+        promotes to demand and drops its probation marker. An auto-load must NOT promote it."""
+        m = make_hermetic_skill_manager(tmp_path)
+        m._metrics['proto'] = _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=3)
+        m._increment_load_count('proto', '1.0.0', agent_selected=True)
+        assert m._metrics['proto']['origin'] == ORIGIN_DEMAND
+        assert m._metrics['proto']['prefetched_turn'] is None
+        assert m._metrics['proto']['agent_selected_loads'] == 1
+        # negative control: harness auto-load (agent_selected=False) leaves it in probation.
+        m._metrics['auto'] = _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=5)
+        m._increment_load_count('auto', '1.0.0', agent_selected=False)
+        assert m._metrics['auto']['origin'] == ORIGIN_PROBATION
+        assert m._metrics['auto']['prefetched_turn'] == 5
+
+    def test_eviction_victim_order_and_per_tick_cap(self, tmp_path):
+        """Over-target eviction retires expired-probation → remaining-probation (oldest prefetch
+        first) → demand-LRU (least-recently-loaded first), protects recently-loaded demand, and
+        never exceeds SKILL_CACHE_MAX_EVICT_PER_TICK in one tick."""
+        m = make_hermetic_skill_manager(tmp_path)
+        m.pool = _cache_pool(skill_cache_probation_ttl_turns=5, skill_cache_max_evict_per_tick=10)
+        m._global_activity_turns = 100
+        m._cache_target = lambda: 3   # deterministically force a 4-victim over-shoot (7 active)
+        m._metrics = {
+            'ep':    _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=0),   # age100 → expired (oldest)
+            'p_old': _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=90),  # age10  → fresh, oldest fresh
+            'p_new': _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=98),  # age2   → fresh, newest fresh
+            'd_none': _cache_active_entry(last_load_turn=None),  # demand, never loaded → most evictable
+            'd_old': _cache_active_entry(last_load_turn=10),     # demand LRU
+            'd_mid': _cache_active_entry(last_load_turn=50),     # demand LRU
+            'prot':  _cache_active_entry(last_load_turn=100),    # within fair window → protected
+        }
+        victims = m.cache_evict_tick(commit=False)   # shadow: decide without mutating
+        # budget = min(10, 7 - 3) = 4 → expired, then oldest-then-newest fresh probation, then never-loaded demand
+        assert victims == ['ep', 'p_old', 'p_new', 'd_none']
+        assert 'prot' not in victims and 'd_mid' not in victims   # protected / below budget survive
+        # per-tick cap: shrinking the budget can never evict more than the configured max in one tick.
+        m.pool.llm_cfg['skill_cache_max_evict_per_tick'] = 2
+        assert len(m.cache_evict_tick(commit=False)) == 2
+        # shadow ticks mutate nothing — all 7 actives still present.
+        assert sum(1 for v in m._metrics.values() if v['status'] == 'active') == 7
+
+    def test_manual_disabled_never_revived_cache_evicted_can_be(self, tmp_path):
+        """With the cache on, the re-enable/revival path refuses to resurrect an operator-disabled
+        (manual_disabled) skill, while a cache_evicted skill revives normally."""
+        m = make_hermetic_skill_manager(tmp_path)
+        m.pool = _cache_pool()
+        m._metrics['man'] = _default_metrics_entry('inactive')
+        m._metrics['man']['inactive_reason'] = REASON_MANUAL
+        m._disabled_names.add('man')
+        m._metrics['cch'] = _default_metrics_entry('inactive')
+        m._metrics['cch']['inactive_reason'] = REASON_CACHE
+        m._disabled_names.add('cch')
+
+        m._reenable_if_disabled('man')
+        assert m.is_skill_disabled('man')
+        assert m._inactive_reason('man') == REASON_MANUAL   # never auto-revived
+
+        m._reenable_if_disabled('cch')
+        assert not m.is_skill_disabled('cch')
+        assert m._metrics['cch']['status'] == 'active'
+        assert m._metrics['cch']['inactive_reason'] is None  # reason cleared on revival
+
+        # negative control: the manual guard is cache-gated — with the cache OFF (pool-less manager)
+        # the pre-existing behavior re-enables even a manual_disabled skill.
+        m2 = make_hermetic_skill_manager(tmp_path)   # no pool → _cache_enabled() is False
+        m2._metrics['man'] = _default_metrics_entry('inactive')
+        m2._metrics['man']['inactive_reason'] = REASON_MANUAL
+        m2._disabled_names.add('man')
+        m2._reenable_if_disabled('man')
+        assert not m2.is_skill_disabled('man')
+
+    def test_cache_is_a_noop_when_flag_off(self, tmp_path):
+        """Flag OFF: prefetch + eviction make ZERO state change even when called with commit=True —
+        active set, disabled set, metrics, and the activity clock are byte-identical before/after."""
+        m = make_hermetic_skill_manager(tmp_path)
+        m.pool = _cache_pool(skill_cache_active_enabled=False)
+        m._global_activity_turns = 100
+        m._cache_target = lambda: 1   # would be far over-target if the cache were on
+        m._metrics = {nm: _cache_active_entry(origin=ORIGIN_DEMAND, last_load_turn=0)
+                      for nm in ('a', 'b', 'c', 'd')}
+        m._metrics['a']['inactive_reason'] = REASON_CACHE
+        snap_metrics = _copy.deepcopy(m._metrics)
+        snap_disabled = set(m._disabled_names)
+        snap_turns = m._global_activity_turns
+
+        assert m.prefetch_for_task('deterministic task text here', commit=True) == []
+        assert m.cache_evict_tick(commit=True) == []   # commit even — flag OFF must still no-op
+        assert m._metrics == snap_metrics
+        assert m._disabled_names == snap_disabled
+        assert m._global_activity_turns == snap_turns
+
+        # flag ON but shadow (commit=False) computes a decision yet still mutates nothing.
+        m.pool.llm_cfg['skill_cache_active_enabled'] = True
+        assert m.cache_evict_tick(commit=False)   # non-empty decision, logged only
+        assert m._metrics == snap_metrics
+        assert m._disabled_names == snap_disabled
+
+    def test_prefetch_root_only_guard(self, tmp_path, monkeypatch):
+        """The boundary worker fires prefetch+eviction ONLY for a root run (parent_instance None);
+        a child run never invokes the worker. Worker is driven synchronously via a Thread stub (no
+        real threads / no sleeping)."""
+        from agent_cascade.engine import core as ac_core
+        from agent_cascade.engine.core import ExecutionEngine
+
+        class _StubThread:
+            def __init__(self, target=None, args=(), name=None, daemon=None):
+                self._target, self._args = target, args
+
+            def start(self):
+                self._target(*self._args)
+        monkeypatch.setattr(ac_core.threading, 'Thread', _StubThread)
+
+        class _Eng:
+            _consume_turn = ExecutionEngine._consume_turn
+            _extract_cache_task_text = ExecutionEngine._extract_cache_task_text
+            _run_skill_cache_boundary = ExecutionEngine._run_skill_cache_boundary
+
+            def _telemetry(self):
+                return None
+
+        # root run → worker runs prefetch + eviction
+        rec = _CacheRec()
+        eng = _Eng()
+        eng.pool = SimpleNamespace(skill_manager=rec)
+        root = SimpleNamespace(_turn_consumed=False, parent_instance=None,
+                               conversation=[{'role': 'user', 'content': 'do the task'}])
+        eng._consume_turn(root, 2)
+        assert any(c[0] == 'prefetch' for c in rec.calls)
+        assert any(c[0] == 'evict' for c in rec.calls)
+
+        # child run → worker never runs (negative control for the root-only guard)
+        rec2 = _CacheRec()
+        eng2 = _Eng()
+        eng2.pool = SimpleNamespace(skill_manager=rec2)
+        child = SimpleNamespace(_turn_consumed=False, parent_instance=SimpleNamespace(),
+                                conversation=[{'role': 'user', 'content': 'subtask'}])
+        eng2._consume_turn(child, 2)
+        assert rec2.calls == []

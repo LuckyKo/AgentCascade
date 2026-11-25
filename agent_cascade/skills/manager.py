@@ -2391,8 +2391,10 @@ class SkillManager:
                 # never deliberately loaded (most evictable) or outside the fair window → a victim
                 demand.append((d['last_load_turn'] if d['last_load_turn'] is not None else -1, name))
             # else: recently loaded demand → protected this tick (skip entirely)
-        expired = sorted([p for p in prob if p[0] > ttl], key=lambda p: (p[0], p[1]))
-        fresh_prob = sorted([p for p in prob if p[0] <= ttl], key=lambda p: (p[0], p[1]))
+        # Probation victims go oldest-first: age (global_turns - prefetched_turn) DESCENDING = the
+        # earliest-prefetched probation is retired first. (Demand below uses ascending load turn = LRU.)
+        expired = sorted([p for p in prob if p[0] > ttl], key=lambda p: (-p[0], p[1]))
+        fresh_prob = sorted([p for p in prob if p[0] <= ttl], key=lambda p: (-p[0], p[1]))
         demand.sort(key=lambda p: (p[0], p[1]))  # LRU: least-recently-loaded first
         victims = [name for _, name in (expired + fresh_prob + demand)[:budget]]
         if not victims:
