@@ -1,16 +1,21 @@
 """Regression tests: "refresh souls" updates the soul body of EXISTING instances,
-but ONLY when the reload actually detected a change.
+gated on the per-instance staleness marker (not on the template-change detection).
 
-Corrected design (see plans/bug_soul_refresh_existing_instances.md + NEEDS-WORK review):
-_apply_soul_refresh_to_existing_instances() rewrites the raw soul body into conv[0],
-which WIPES the volatile sections (identity, AVAILABLE AGENTS, Session Metadata, OWASP
-trust boundary) that _refresh_system_prompt had injected on top of the body. That is only
-safe when a config bump accompanies the rewrite, because the bump forces a next-turn
-cache-miss rebuild that re-injects the volatile sections. So the apply step is GATED to
-refresh_agents()'s change branch — never on a no-change refresh. A no-change refresh must
-leave live instances completely untouched (they already carry the current on-disk soul and
-a fully decorated prompt); stripping them without a rebuild would serve a trust-boundary-less
-prompt verbatim.
+Design (see notes/bug_soul_refresh_nochange_gate.md): the soul body (template.system_message)
+is written into conv[0], which WIPES the volatile sections (identity, AVAILABLE AGENTS, Session
+Metadata, OWASP trust boundary) that _refresh_system_prompt had injected on top of the body. That
+is only safe when a config bump accompanies the rewrite, because the bump forces a next-turn
+cache-miss rebuild that re-injects the volatile sections. The original bug: the apply step was gated
+on refresh_agents()'s IN-MEMORY-vs-RELOADED template-change branch, which never fires when the
+in-memory template is already fresh (kept current by startup + get_template mtime-invalidation) — so
+a live instance carrying a STALE conv[0] soul body was never updated.
+
+The fix decouples the sync from that gate: _apply_soul_refresh_to_existing_instances() runs on
+EVERY refresh and is idempotent via each instance's _soul_body_hash marker (hash of the soul body
+in conv[0]). It rewrites only instances whose marker is stale (None or older) and returns whether it
+rewrote anything; refresh_agents() then bumps the config version if a rewrite happened without the
+template-change branch already having bumped. A no-op refresh (marker already current) leaves live
+instances byte-identical — the security-relevant no-change invariant.
 
 These tests drive a real AgentPool over a temp agents dir (mocked peripheral deps, mirroring
 tests/test_bug0235_template_invalidation.py) and attach bare AgentInstances to pool.instances.
@@ -101,9 +106,13 @@ def soul_pool(tmp_path):
     yield pool, soul
 
 
-def _make_inst(name, agent_class, sys_body, *, frozen=True):
+def _make_inst(name, agent_class, sys_body, *, frozen=True, soul_body_hash=None):
     """Bare AgentInstance whose conv[0] carries sys_body, with _cached_messages mirroring
     production's shallow copy of conversation (so cached[0] IS conversation[0]).
+
+    soul_body_hash seeds the _soul_body_hash staleness marker: pass the current template hash
+    to model an up-to-date instance (a no-op refresh leaves it untouched), or an older/None
+    value to model a stale instance (the next refresh rewrites conv[0]).
     """
     conversation = [Message(role=SYSTEM, content=sys_body)]
     inst = AgentInstance(
@@ -118,6 +127,7 @@ def _make_inst(name, agent_class, sys_body, *, frozen=True):
     # the shallow copy means conv[0] and cached[0] are the SAME Message object.
     inst._cached_messages = conversation
     inst._system_prompt_frozen = frozen
+    inst._soul_body_hash = soul_body_hash
     return inst
 
 
@@ -191,28 +201,37 @@ class TestApplySoulRefresh:
 
 
 class TestRefreshAgentsEndToEnd:
-    """refresh_agents() wiring: apply runs ONLY on a real change, never on a no-change."""
+    """refresh_agents() wiring: the soul-sync runs on EVERY call but is idempotent via the
+    per-instance _soul_body_hash marker; the config version is bumped iff a rewrite happened."""
 
     def test_no_change_refresh_leaves_instances_untouched(self, soul_pool):
-        """No disk edit → change branch not taken → apply never runs. A fully-decorated
-        prompt (volatile sections intact, trust boundary present) and the frozen flag must
-        both be preserved. This is the security-relevant no-change invariant.
+        """In-memory template already fresh (change branch is a no-op) AND the instance's
+        marker already matches the current hash → the always-run sync skips it, leaving a
+        fully-decorated prompt (volatile sections intact, trust boundary present), the frozen
+        flag, and the config version all untouched. This is the security-relevant no-change
+        invariant: a no-op refresh must not strip a decorated prompt without a rebuild.
         """
         pool, _ = soul_pool
         key = _template_key(pool)
+        current_hash = pool._compute_template_hash(key)
 
-        inst = _make_inst('LiveNoChange', key, _DECORATED_PROMPT)
+        # Up-to-date instance: its marker equals the current template hash, so the always-run
+        # soul-sync skips it (no volatile strip, no config bump).
+        inst = _make_inst('LiveNoChange', key, _DECORATED_PROMPT, soul_body_hash=current_hash)
         assert inst._system_prompt_frozen is True
         pool.instances['LiveNoChange'] = inst
+        cv_before = pool._config_version
 
-        pool.refresh_agents()  # no on-disk change → no notify, no apply
+        pool.refresh_agents()  # no on-disk change → change branch no-op; marker current → sync skips
 
         # The decorated prompt must NOT be stripped to the raw body...
         assert inst.conversation[0].content == _DECORATED_PROMPT
         # ...the trust boundary (the OWASP guard) must survive verbatim...
         assert 'trust boundary' in inst.conversation[0].content
-        # ...and the instance must remain frozen (we never touched it).
+        # ...the instance must remain frozen (we never touched it)...
         assert inst._system_prompt_frozen is True
+        # ...and the config version must NOT bump (true no-op).
+        assert pool._config_version == cv_before
 
     def test_change_refresh_updates_instances(self, soul_pool):
         """On a real on-disk edit the change branch fires: notify_config_changed() bumps
@@ -225,6 +244,7 @@ class TestRefreshAgentsEndToEnd:
         inst = _make_inst('LiveChange', key, 'STALE SOUL BODY')
         assert inst._system_prompt_frozen is True
         pool.instances['LiveChange'] = inst
+        cv_before = pool._config_version
 
         # Edit the soul on disk → content hash changes → change branch fires.
         soul.write_text(_SOUL_NEW, encoding='utf-8')
@@ -235,3 +255,50 @@ class TestRefreshAgentsEndToEnd:
         assert new_body != 'STALE SOUL BODY'
         assert inst.conversation[0].content == new_body
         assert inst._system_prompt_frozen is False
+        # The change-branch rewrite is paired with a config bump (the invariant), so the next
+        # turn's forced rebuild re-injects the volatile sections on top of the new soul body.
+        assert pool._config_version > cv_before
+
+    def test_stale_instance_synced_when_template_already_fresh(self, soul_pool):
+        """EXACT bug repro (bug_soul_refresh_nochange_gate.md): the in-memory template is
+        already up-to-date (so the in-memory-vs-reloaded template-change branch is a NO-OP),
+        but an existing instance carries a STALE conv[0] soul body (its _soul_body_hash is
+        older than the current template hash). The decoupled, always-run soul-sync must still
+        rewrite that instance and bump the config version. A SECOND refresh (now up-to-date)
+        must be a true no-op — no config bump, conv[0] byte-identical.
+        """
+        pool, _ = soul_pool
+        key = _template_key(pool)
+        current_hash = pool._compute_template_hash(key)
+
+        # In-memory template is already fresh: no on-disk change, so refresh_agents() takes the
+        # no-change branch. The instance's marker is OLDER than the current hash → stale conv[0].
+        assert current_hash is not None
+        inst = _make_inst('Stale1', key, _DECORATED_PROMPT, soul_body_hash='STALE_OLD_HASH')
+        assert inst._soul_body_hash != current_hash
+        assert inst._system_prompt_frozen is True
+        pool.instances['Stale1'] = inst
+        cv_before = pool._config_version
+
+        pool.refresh_agents()  # template-change branch is a no-op; marker stale → sync must fire
+
+        # The SERVED conv[0] must now carry the CURRENT template soul body (not the decorated
+        # stale body), proving the rewrite reached the message that gets rebuilt — not just a
+        # template variable. Volatile sections are re-injected on the next-turn forced rebuild.
+        assert inst.conversation[0].content == pool.templates[key].system_message
+        # The instance is unfrozen so _refresh_system_prompt re-injects the volatile sections.
+        assert inst._system_prompt_frozen is False
+        # The marker is now stamped to the current hash, so the staleness is recorded correctly.
+        assert inst._soul_body_hash == pool._compute_template_hash(key)
+        # The rewrite is paired with a config bump (the invariant) so the next turn rebuilds.
+        assert pool._config_version == cv_before + 1
+
+        # SECOND refresh: marker now current and no disk change → true no-op.
+        conv0_before = inst.conversation[0].content
+        frozen_before = inst._system_prompt_frozen
+        cv_before2 = pool._config_version
+        pool.refresh_agents()
+
+        assert pool._config_version == cv_before2  # no bump on a no-op refresh
+        assert inst.conversation[0].content == conv0_before  # byte-identical
+        assert inst._system_prompt_frozen is frozen_before  # untouched (sync skipped it)

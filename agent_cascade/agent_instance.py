@@ -443,6 +443,18 @@ class AgentInstance:
     _last_config_version: int = field(default=-1)  # Pool config version at last rebuild
     _system_prompt_frozen: bool = field(
         default=False)  # True after first successful _setup_turn; conversation[0] is immutable
+    # Soul-body staleness marker for the "refresh souls" feature (see pool.refresh_agents /
+    # _apply_soul_refresh_to_existing_instances). Holds pool._compute_template_hash(agent_class)
+    # — the hash of the soul body (template.system_message) currently embedded in conv[0]. It is a
+    # SEPARATE marker because conv[0].content is soul-body + injected volatile sections and is never
+    # equal to the raw template.system_message, so content cannot be the staleness signal.
+    # Set to the current hash at genuine instance creation (find_or_create_instance fresh branch,
+    # where conv[0] is about to be built from the current template) and updated by the soul-sync.
+    # Defaults to None for instances built by restore paths (snapshot/session_io) and the
+    # pool.create_instance root path: an unknown-vintage restored conv[0] must be treated as stale
+    # so the first "refresh souls" re-syncs it. A None/older hash != current triggers a rewrite;
+    # an equal hash is a true no-op (no conv[0] touch, no config bump).
+    _soul_body_hash: Optional[str] = None
 
     # ── Loop Detection Cooldown (Fix /compress Bug) ───────────────────────────
     # After compression/rollback, the conversation state has concentrated patterns that can trigger

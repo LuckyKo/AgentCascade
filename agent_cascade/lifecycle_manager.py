@@ -419,6 +419,20 @@ class AgentLifecycleManager:
             if prior_kv_birth:
                 inst.kv_birth_ts = prior_kv_birth
 
+            # Stamp the soul-body staleness marker for "refresh souls" (see
+            # pool._apply_soul_refresh_to_existing_instances). This is the genuine-creation
+            # branch: conv[0] is about to be built from the CURRENT template by the caller's
+            # build_system_message → initialize_conversation, so the instance starts up-to-date
+            # with the current soul-body hash. A subsequent no-disk-change refresh is then a true
+            # no-op for this instance. Restored sessions (find_or_create's log_file branch reuses
+            # an instance built by session_io, which leaves the marker at its None default) and
+            # the pool.create_instance root path are intentionally left None so the first refresh
+            # re-syncs an unknown-vintage conv[0].
+            # _compute_template_hash is always present: AgentPool hardwires ConfigPersistMixin as
+            # a base, so self.pool is always an AgentPool. Call it directly — a missing method would
+            # be a wiring bug worth failing loud on, not a silent degrade-to-None.
+            inst._soul_body_hash = self.pool._compute_template_hash(agent_class)
+
             if existing is not None:
                 # Warn about overwriting an active instance
                 logger.warning(f"[NEW INSTANCE] '{instance_name}' ({agent_class}) replacing active instance. "

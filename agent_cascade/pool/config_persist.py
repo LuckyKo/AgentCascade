@@ -857,7 +857,8 @@ class ConfigPersistMixin:
                     break
 
             # Only notify if something actually changed
-            if keys_changed or not all_hashes_match:
+            change_detected = keys_changed or not all_hashes_match
+            if change_detected:
                 if keys_changed:
                     added = new_template_keys - old_template_keys
                     removed = old_template_keys - new_template_keys
@@ -866,33 +867,59 @@ class ConfigPersistMixin:
                     # Content modification triggers config update, log at info level for visibility
                     logger.info('[REFRESH] Template content modified, triggering config update')
                 self.notify_config_changed()
-                # Sync the reloaded soul body into conv[0] of every EXISTING instance so
-                # the "refresh souls" action takes effect on live sessions, not only on
-                # freshly spawned ones. Called ONLY in the change branch so the config
-                # bump above always accompanies a conv[0] rewrite: the next turn is a
-                # guaranteed cache-miss rebuild that regenerates the cached message lists
-                # from the corrected conv[0], and _refresh_system_prompt re-injects the
-                # volatile sections on top of the new soul body. On a no-change refresh
-                # nothing is rewritten, so live instances keep their already-correct prompt.
-                self._apply_soul_refresh_to_existing_instances()
-            else:
+
+            # Sync the reloaded soul body into conv[0] of every EXISTING instance on EVERY refresh,
+            # decoupled from the template-change gate (see bug_soul_refresh_nochange_gate.md). The
+            # gate on the in-memory-vs-reloaded template change detection was the original bug: when
+            # the in-memory template is already fresh (kept current by startup + get_template
+            # mtime-invalidation) the change branch never fires, yet an EXISTING instance can still
+            # carry a stale soul body in conv[0] that needs updating. This call is idempotent via
+            # each instance's _soul_body_hash marker — it rewrites only instances whose soul body is
+            # actually stale and returns True iff it rewrote at least one.
+            soul_body_rewritten = self._apply_soul_refresh_to_existing_instances()
+
+            # Safety invariant (the original reviewer's BLOCKER): a conv[0] rewrite strips the
+            # injected volatile sections (identity, AVAILABLE AGENTS, Session Metadata, OWASP trust
+            # boundary), so it MUST be accompanied by a config bump — the bump forces a next-turn
+            # cache-miss rebuild that re-injects them on top of the freshly-synced soul body. The
+            # change branch already bumped above when change_detected is True; bump here ONLY when
+            # the sync rewrote a stale soul body WITHOUT the change branch having fired (the
+            # no-change-but-instance-stale case this fix targets). A truly-no-op refresh (neither
+            # change detected nor soul body rewritten) leaves live instances byte-identical.
+            if soul_body_rewritten and not change_detected:
+                logger.info('[REFRESH] Soul body stale on existing instance(s), triggering config update')
+                self.notify_config_changed()
+            elif not change_detected:
                 logger.debug('[REFRESH] No changes detected in agent templates, skipping notification')
 
-    def _apply_soul_refresh_to_existing_instances(self) -> None:
-        """Rewrite the soul body (template.system_message) in the conv[0] of every
-        EXISTING instance.
+    def _apply_soul_refresh_to_existing_instances(self) -> bool:
+        """Rewrite the soul body (template.system_message) in the conv[0] of every EXISTING
+        instance whose soul body is actually stale. Idempotent.
 
-        Called only from the change branch of refresh_agents(), immediately after
-        notify_config_changed(). Writing the raw soul body into conv[0] overwrites the
-        VOLATILE sections (identity, AVAILABLE AGENTS, Session Metadata, trust boundary)
-        that _refresh_system_prompt previously injected on top of the old body. That is
-        safe because the preceding config bump forces a cache-miss rebuild on the next
-        turn: the rebuild regenerates _cached_messages and _cached_llm_messages from the
-        corrected conv[0] (so the cached message lists self-heal, including any that were
-        rebuilt as separate objects), and _refresh_system_prompt re-injects the volatile
-        sections on top of the new soul body. The one-time KV-cache prefix invalidation
-        (one re-prefill per instance) is the accepted cost of the action.
+        Called on EVERY refresh_agents() call (decoupled from the template-change gate).
+        Staleness is decided by each instance's `_soul_body_hash` marker — NOT by comparing
+        conv[0].content to template.system_message, because conv[0].content is the soul body
+        PLUS the injected volatile sections and is never equal to the raw body. When the marker
+        already equals the current `_compute_template_hash(agent_class)` the instance is
+        up-to-date and is left byte-identical (a no-op refresh touches nothing); when it
+        differs (None for restored instances, or an older hash) conv[0] is rewritten.
+
+        Writing the raw soul body into conv[0] overwrites the VOLATILE sections (identity,
+        AVAILABLE AGENTS, Session Metadata, trust boundary) that _refresh_system_prompt had
+        injected on top of the old body. That is safe because the caller pairs every rewrite with
+        a config bump (see refresh_agents), forcing a cache-miss rebuild on the next turn: the
+        rebuild regenerates _cached_messages / _cached_llm_messages from the corrected conv[0]
+        (so the cached message lists self-heal, including any rebuilt as separate objects), and
+        _refresh_system_prompt re-injects the volatile sections on top of the new soul body. The
+        one-time KV-cache prefix invalidation (one re-prefill per rewritten instance) is the
+        accepted cost of a real (not no-op) soul refresh.
+
+        Returns:
+            True if at least one instance's conv[0] was rewritten, False if every instance was
+            already up-to-date (or there were no instances). The caller uses this to decide
+            whether a config bump is required outside the template-change branch.
         """
+        rewrote_any = False
         for inst_name, instance in list(self.instances.items()):
             agent_class = instance.agent_class
             template = self.templates.get(agent_class)
@@ -901,6 +928,13 @@ class ConfigPersistMixin:
                 continue
             new_soul = getattr(template, 'system_message', '') or ''
             if not new_soul:
+                continue
+            current_hash = self._compute_template_hash(agent_class)
+            # Up-to-date marker → conv[0] already carries this soul body. Skip so a no-op
+            # refresh leaves the instance byte-identical (no volatile strip, no config bump).
+            # current_hash is always non-None here: the template is confirmed non-None above
+            # and system_message is a str, so _compute_template_hash cannot return None.
+            if instance._soul_body_hash == current_hash:
                 continue
             with instance._compression_lock:
                 if not instance.conversation:
@@ -913,9 +947,15 @@ class ConfigPersistMixin:
                 # Unfreeze so _refresh_system_prompt re-injects the volatile sections on
                 # the next turn's forced rebuild (the volatile sections were just wiped).
                 instance._system_prompt_frozen = False
+                # Stamp the marker ONLY on a successful rewrite so it always reflects the
+                # soul body actually embedded in conv[0] (the empty-conversation `continue`
+                # above intentionally leaves it None, so the next refresh retries).
+                instance._soul_body_hash = current_hash
+            rewrote_any = True
             logger.debug(
                 f"[SOUL_REFRESH] Updated soul body for {inst_name} ({agent_class})"
             )
+        return rewrote_any
 
     def notify_config_changed(self):
         """Signal that global configuration has changed (workspace dir, templates, etc).
