@@ -55,6 +55,7 @@ favourable operating point under the synthetic oracle) and additionally reports 
 
 import os
 import sys
+import subprocess
 import tempfile
 import shutil
 import traceback
@@ -66,9 +67,18 @@ from types import SimpleNamespace
 # is derived from str-hash order — so identical workloads drift across processes without a fixed seed.
 # Re-exec the interpreter with the seed pinned so a plain `python tests/eval_skill_cache_ab.py` is
 # byte-reproducible. (Must happen before importing agent_cascade, which builds hashed sets at import.)
+# Empirically seed-sensitive: under PYTHONHASHSEED 0/1/2 the Run-B cold-loads read 62/56/59 and the
+# telemetry slice swings (13/3/13 admissions/evictions/promotions at seed 0; 43/27/43 at seed 1;
+# 15/2/15 at seed 2), so the seed MUST be pinned for byte-reproducible output. The committed headline
+# numbers are the PYTHONHASHSEED=0 run. We pin by re-execing via subprocess (NOT os.execv): on Windows
+# os.execv has no native exec — it spawns a detached child whose stdout is NOT inherited by the parent's
+# redirect (so `python ... > out.txt` captures 0 bytes) and which never returns an exit code.
+# subprocess.call inherits stdout/stderr and returns the child's exit code, so a plain run prints the
+# table and propagates exit 0.
 if os.environ.get('PYTHONHASHSEED') != '0':
-    os.environ['PYTHONHASHSEED'] = '0'
-    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__), *sys.argv[1:]])
+    _env = dict(os.environ, PYTHONHASHSEED='0')
+    _rc = subprocess.call([sys.executable, os.path.abspath(__file__)] + sys.argv[1:], env=_env)
+    sys.exit(_rc)
 
 # Make the repo importable when run as a plain script (python tests/eval_skill_cache_ab.py).
 REPO = Path(__file__).resolve().parents[1]
