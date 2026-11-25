@@ -24,12 +24,12 @@ from typing import Dict, List, Optional
 from agent_cascade import settings
 from agent_cascade.cost import tokens_to_cost
 from agent_cascade.log import _AppLoggerProxy
-from agent_cascade.prompts import dna  # DNA_VERSION / PROMPT_HASH for the parallel DNA bin (BUG_0337)
+from agent_cascade.prompts import dna  # DNA_VERSION / PROMPT_HASH for the parallel DNA bin
 
 # Late-bound delegate to the live app logger (see agent_cascade.log._AppLoggerProxy).
 # A plain ``logging.getLogger('agent_cascade.telemetry')`` is a SIBLING of the
 # handler-bearing 'agent_cascade_logger', so its DEBUG/INFO records never reach
-# console.log (same class as BUG_0103).
+# console.log.
 _logger = _AppLoggerProxy()
 
 # Module-level RLock protecting ALL telemetry shared state and file I/O.
@@ -135,7 +135,7 @@ class TelemetryCollector:
             'total_input_tokens_est': 0,
             'total_output_tokens_est': 0,
             # Output tokens produced by streaming calls only — the numerator that
-            # matches total_streaming_time_ms for TPS (BUG_0133).
+            # matches total_streaming_time_ms for TPS.
             'total_streamed_output_tokens': 0,
             'total_llm_latency_ms': 0,
             'total_ttft_ms': 0,
@@ -163,7 +163,7 @@ class TelemetryCollector:
             'skill_advisor_calls': 0,
             'skill_advisor_denials': 0,
             'skill_advisor_fallbacks': 0,
-            # Hint-usage observability counters (BUG_0311). Pure additive surfacing of
+            # Hint-usage observability counters. Pure additive surfacing of
             # what the hint path already emitted; never affects hint generation/gating.
             'total_hints_posted': 0,            # non-empty hint blocks delivered
             'hint_memory_entries': 0,           # Σ memory entries shown across posted blocks
@@ -191,7 +191,7 @@ class TelemetryCollector:
         # Per-config aggregates for A/B comparison
         self._config_stats: Dict[str, Dict] = {}
 
-        # Per-ENDPOINT cache attribution (BUG_0273 Option A). The model-only
+        # Per-ENDPOINT cache attribution (Option A). The model-only
         # config_fingerprint groups A/B rows by model and cannot represent the
         # endpoint that actually served a call, so a use_last_endpoint agent's
         # fresh-reusable-instance cache misses were booked to the wrong model
@@ -222,7 +222,7 @@ class TelemetryCollector:
         # fingerprint is model-only), so this is a separate accumulator from _config_stats.
         self._agent_class_stats: Dict[str, Dict] = {}
 
-        # Per-DNA-version aggregates (BUG_0337 Phase 1) — a PARALLEL bin to the
+        # Per-DNA-version aggregates (Phase 1) — a PARALLEL bin to the
         # model-only _config_stats, keyed by dna.DNA_VERSION. Additive: it does
         # NOT re-key or affect the model-only A/B rows or the cache attribution.
         # Fed only from record_turn_start (runs) and record_turn_end (per-turn
@@ -265,7 +265,7 @@ class TelemetryCollector:
         # Guard against duplicate session_end events (BUG 8 fix)
         self._session_ended = False
 
-        # BUG_0400 (a): count real (non-checkpoint) events written since the last
+        # Count real (non-checkpoint) events written since the last
         # telemetry_stats checkpoint. When TELEMETRY_CHECKPOINT_EVENT_INTERVAL is
         # crossed, _write_to_file emits a periodic checkpoint and resets this, bounding
         # the aggregates lost to an unhandled hard-kill to at most one interval. Set
@@ -649,7 +649,7 @@ class TelemetryCollector:
         A/B token/cost grouping). The prompt KV cache belongs to the endpoint
         that actually served the call, not the configured model, so cache
         hits/misses are attributed to this key instead of the model-only
-        fingerprint (BUG_0273). Derived from ``instance._last_endpoint_config``
+        fingerprint. Derived from ``instance._last_endpoint_config``
         (engine/llm_call.py), the ground-truth endpoint that ran the call
         regardless of router fallbacks / ``use_last_endpoint``.
 
@@ -678,7 +678,7 @@ class TelemetryCollector:
 
         The fingerprint is model-only (see ``fingerprint_config``), so this
         description is a sample of the first turn that used the model, not a
-        property of the whole row (BUG_0131).
+        property of the whole row.
         """
         cfg = generate_cfg or {}
         return {
@@ -704,7 +704,7 @@ class TelemetryCollector:
         ``config_description`` is captured on first sight and intentionally not
         refreshed: the fingerprint groups by model only, so sampling/endpoint
         details are not part of the row identity. Callers must not present this
-        description's sampling values as describing the whole row (BUG_0131).
+        description's sampling values as describing the whole row.
         """
         if fingerprint and fingerprint not in self._config_stats:
             self._config_stats[fingerprint] = {
@@ -721,7 +721,7 @@ class TelemetryCollector:
                 'input_tokens_est': 0,
                 'output_tokens_est': 0,
                 # Streaming-only output tokens: the TPS numerator that matches
-                # total_streaming_time_ms (BUG_0133).
+                # total_streaming_time_ms.
                 'streamed_output_tokens': 0,
                 'total_duration_ms': 0,
                 'total_llm_latency_ms': 0,
@@ -740,7 +740,7 @@ class TelemetryCollector:
         ``cache_key`` is built by ``cache_attribution_key`` from the resolved
         endpoint. Unlike ``_ensure_config_stats`` this row carries ONLY cache
         counters — token/cost/latency/A-B stay on the model-only ``_config_stats``
-        row (BUG_0273 Option A). Returns the (created or existing) bucket so callers
+        row (Option A). Returns the (created or existing) bucket so callers
         can subscript it directly. Caller must hold ``_telemetry_lock``.
         """
         if cache_key and cache_key not in self._cache_stats:
@@ -751,7 +751,7 @@ class TelemetryCollector:
         return self._cache_stats.get(cache_key)
 
     def _ensure_dna_stats(self, dna_version: str):
-        """Ensure the per-DNA-version bucket exists for *dna_version* (BUG_0337).
+        """Ensure the per-DNA-version bucket exists for *dna_version*.
 
         Additive parallel bin: keyed by the DNA label, NOT the model-only
         fingerprint. Caller must hold ``_telemetry_lock``. Returns the (created or
@@ -814,14 +814,14 @@ class TelemetryCollector:
                 'config_fingerprint': config_fingerprint,
                 'config_description': config_description or {},
                 'agent_class': agent_class,
-                'dna_version': dna.DNA_VERSION,  # BUG_0337: carried to turn_end for the DNA bin
+                'dna_version': dna.DNA_VERSION,  # Carried to turn_end for the DNA bin
                 'llm_calls': 0,
                 'tool_calls': 0,
                 'tool_calls_detail': [],
                 'input_tokens_est': 0,
                 'output_tokens_est': 0,
                 # Per-turn time breakdown, flushed onto the turn_end event so the
-                # JSONL can reproduce the Config/Agent-Class tables offline (BUG_0129).
+                # JSONL can reproduce the Config/Agent-Class tables offline.
                 'llm_latency_ms': 0.0,
                 'ttft_ms': 0.0,
                 'streaming_time_ms': 0.0,
@@ -842,7 +842,7 @@ class TelemetryCollector:
             if agent_class:
                 self._ensure_agent_class_stats(agent_class)['runs'] += 1
 
-            # Per-DNA-version run count (BUG_0337, additive parallel bin).
+            # Per-DNA-version run count (additive parallel bin).
             dna_ver = dna.DNA_VERSION
             if dna_ver:
                 self._ensure_dna_stats(dna_ver)['runs'] += 1
@@ -863,7 +863,7 @@ class TelemetryCollector:
             if not turn:
                 # Normal for the two terminal-stop returns that happen before
                 # record_turn_start; the engine calls end from run()'s finally for
-                # every exit path (BUG_0127), so this is not an error.
+                # every exit path, so this is not an error.
                 _logger.debug(
                     'record_turn_end called for %r but no matching turn_start found.',
                     instance_name,
@@ -884,7 +884,7 @@ class TelemetryCollector:
                 'tool_calls_detail': turn['tool_calls_detail'],
                 'input_tokens_est': turn['input_tokens_est'],
                 'output_tokens_est': turn['output_tokens_est'],
-                # Per-turn time breakdown (BUG_0129): lets the exported JSONL be
+                # Per-turn time breakdown: lets the exported JSONL be
                 # reconciled against the live Config/Agent-Class tables.
                 'llm_latency_ms': round(turn['llm_latency_ms'], 1),
                 'ttft_ms': round(turn['ttft_ms'], 1),
@@ -909,7 +909,7 @@ class TelemetryCollector:
             # would double-count.
             if fp:
                 # Credit the turn's wall-clock to the RESOLVED model's row when the
-                # turn resolved an endpoint (BUG_0273 follow-up), so the serving
+                # turn resolved an endpoint (follow-up), so the serving
                 # endpoint (dflash2) carries the turn time while the configured-model
                 # row (Swift-1.5) stays duration- and call-free and is dropped from the
                 # A/B dump. The turn_end EVENT below keeps the configured ``fp`` (what
@@ -925,7 +925,7 @@ class TelemetryCollector:
                 cs = self._config_stats[credit_fp]
                 cs['total_duration_ms'] += duration_ms
 
-            # Per-DNA-version aggregation (BUG_0337, additive parallel bin). The
+            # Per-DNA-version aggregation (additive parallel bin). The
             # per-turn counters were accumulated live onto the active-turn dict by
             # the record_* methods, so we flush them here once — no record_* method
             # is touched and nothing double-counts (each turn is flushed exactly
@@ -990,7 +990,7 @@ class TelemetryCollector:
         If a call for ``instance_name`` is already in flight, the previous attempt
         never recorded an end (aborted by termination, or a caller that forgot to
         end it). Finalize it first so its latency/tokens are still counted instead
-        of being silently overwritten by the new start (BUG_0128). The nested end
+        of being silently overwritten by the new start. The nested end
         call is safe under the reentrant telemetry lock.
         """
         with _telemetry_lock:
@@ -1008,12 +1008,12 @@ class TelemetryCollector:
                 'model': model,
                 # Snapshot the turn's config fingerprint onto the active call so the
                 # cache classifier in record_token_usage can attribute hits/misses to
-                # the right config row (BUG_0260). Captured here, not read at
+                # the right config row. Captured here, not read at
                 # classification time, because a call can be finalized after its turn
-                # closes (BUG_0128). Empty when no turn is open — such calls move only
+                # closes. Empty when no turn is open — such calls move only
                 # the session-global counters.
                 'config_fingerprint': self._active_turns.get(instance_name, {}).get('config_fingerprint', ''),
-                # Cache-attribution key from the RESOLVED endpoint (BUG_0273),
+                # Cache-attribution key from the RESOLVED endpoint,
                 # snapshotted here parallel to the model-only fingerprint above.
                 # Best-effort at start: the endpoint is only resolved later inside
                 # _do_call, so the engine re-binds the authoritative key via
@@ -1060,7 +1060,7 @@ class TelemetryCollector:
         attribution: ``resolved_config_fingerprint`` is recorded on the open turn so
         ``record_llm_call_end``/``record_turn_end`` book ``llm_calls``/latency/duration
         to the model that ACTUALLY served the call, not the turn's configured template
-        model (BUG_0273 follow-up). See the inline block below for the full rationale.
+        model (follow-up). See the inline block below for the full rationale.
         """
         if not cache_key:
             return
@@ -1070,7 +1070,7 @@ class TelemetryCollector:
                 call['cache_key'] = cache_key
                 if model:
                     call['model'] = model
-                    # Re-key the A/B attribution to the RESOLVED model (BUG_0273
+                    # Re-key the A/B attribution to the RESOLVED model (
                     # follow-up). The turn's configured fingerprint is the wrong row
                     # for a ``use_last_endpoint`` agent (e.g. configured Swift-1.5 but
                     # actually served by dflash2): it would carry an ``llm_calls`` it
@@ -1094,7 +1094,7 @@ class TelemetryCollector:
                         # Create the resolved-model row up front so the per-call
                         # metrics have a target when record_llm_call_end reads this fp.
                         # First-sight description carries the resolved model; sampling
-                        # values are a sample only (BUG_0131), matching the
+                        # values are a sample only, matching the
                         # ``_ensure_config_stats`` contract.
                         self._ensure_config_stats(
                             resolved_fp,
@@ -1159,8 +1159,8 @@ class TelemetryCollector:
 
         A first call on the instance (``prev is None``) has no prior baseline, so it is
         not a *differential* miss — but its uncached share is a full re-prefill (a cold
-        start), which is costly and must count toward waste for cost estimation
-        (BUG_0281). It is tagged ``root_cause='cold_start'``.
+        start), which is costly and must count toward waste for cost estimation.
+        It is tagged ``root_cause='cold_start'``.
 
         Otherwise returns ``{'missed': int, 'root_cause': str, 'idle_ms': float}`` where
         ``root_cause`` is one of ``'cold_start'`` (first call, no baseline),
@@ -1181,15 +1181,14 @@ class TelemetryCollector:
                 # Cold start: first call on this instance, no prior baseline to compare.
                 # Its uncached share is a full re-prefill (a necessary first prefill) —
                 # count it so post-restart / new-instance prefills are visible in cost
-                # estimation (BUG_0281). A provider that reports cached_tokens>0 here is
+                # estimation. A provider that reports cached_tokens>0 here is
                 # not a true cold start, so only the uncached remainder counts.
                 missed = prompt_tokens - cached_tokens
                 if missed <= CACHE_MISS_NOISE_FLOOR_TOKENS:
                     return None
                 return {'missed': missed, 'root_cause': 'cold_start', 'idle_ms': 0.0}
             # Post-compression fresh baseline: the prompt legitimately shrank, so this
-            # call's re-prefill is a necessary consequence of the compression, not waste
-            # (BUG_0281).
+            # call's re-prefill is a necessary consequence of the compression, not waste.
             if prev.get('post_compression'):
                 return None
             # Sticky reported_cache guard: a provider that never reports cached_tokens > 0
@@ -1253,7 +1252,7 @@ class TelemetryCollector:
                         # [KV_CACHE_MISS] line reports the value the classifier used,
                         # even if a subsequent multi-callback overwrites input_tokens_est.
                         call['classified_prompt_tokens'] = int(prompt_tokens)
-                        # Prompt-cache attribution (BUG_0260 + BUG_0273 Option A).
+                        # Prompt-cache attribution (Option A).
                         # Prefer the cache key derived from the RESOLVED endpoint
                         # (threaded by record_llm_call_start); fall back to the
                         # model-only fingerprint only when no resolved endpoint is
@@ -1281,7 +1280,7 @@ class TelemetryCollector:
                             elif fp and fp in self._config_stats:
                                 self._config_stats[fp]['cache_misses'] += 1
                             # Retained for the [KV_CACHE_MISS] debug line emitted in
-                            # record_llm_call_end (todo.md:105 / BUG_0101 tracking).
+                            # record_llm_call_end (todo.md:105).
                             call['cached_tokens'] = int(cached or 0)
             except Exception as e:
                 _logger.debug('Cache classification from usage failed for %s: %s', instance_name, e)
@@ -1362,7 +1361,7 @@ class TelemetryCollector:
                         delta = max(0.0, pricing.get('input_per_m', 0.0) - pricing.get('cache_read_per_m', 0.0))
                         self._session_stats['llm_wasted_cost'] += scan['missed'] * delta / 1e6
                     # Attribute to the config row via the fingerprint snapshotted at call
-                    # start (same source as the cache hit/miss classifier, BUG_0260).
+                    # start (same source as the cache hit/miss classifier).
                     fp = call.get('config_fingerprint') or ''
                     if fp and fp in self._config_stats:
                         self._config_stats[fp]['wasted_tokens'] += scan['missed']
@@ -1405,7 +1404,7 @@ class TelemetryCollector:
                     if _call_cost:
                         _iu['cost'] += _call_cost
 
-            # todo.md:105 / BUG_0101 — one greppable debug line per KV-cache miss so
+            # todo.md:105 — one greppable debug line per KV-cache miss so
             # unexpected prompt reprocesses can be tracked from console.log. The server's
             # cached_tokens is authoritative: a miss means the full prompt was reprocessed
             # (the latency/ttft values show how expensive that was). When the waste
@@ -1455,13 +1454,13 @@ class TelemetryCollector:
             self._session_stats['total_output_tokens_est'] += actual_output
             if streaming_time_ms > 0:
                 # Only streamed output has streaming time, so only it belongs in
-                # the TPS numerator (BUG_0133).
+                # the TPS numerator.
                 self._session_stats['total_streamed_output_tokens'] += actual_output
             self._session_stats['total_llm_latency_ms'] += latency_ms
             self._session_stats['total_ttft_ms'] += ttft_ms
             self._session_stats['total_streaming_time_ms'] += streaming_time_ms
             self._session_stats['llm_calls_by_model'][call['model']] += 1
-            # Cache coverage (BUG_0132): a call that never received a usable
+            # Cache coverage: a call that never received a usable
             # usage classification is "unknown", never silently neither-hit-nor-
             # miss. Guarantees hits + misses + unknown == total_llm_calls.
             if not call.get('cache_classified'):
@@ -1484,7 +1483,7 @@ class TelemetryCollector:
             turn = self._active_turns.get(instance_name)
             if turn:
                 turn['llm_calls'] += 1
-                # Per-turn time breakdown (BUG_0129) — flush onto the turn_end event.
+                # Per-turn time breakdown — flush onto the turn_end event.
                 turn['llm_latency_ms'] += latency_ms
                 turn['ttft_ms'] += ttft_ms
                 turn['streaming_time_ms'] += streaming_time_ms
@@ -1501,7 +1500,7 @@ class TelemetryCollector:
                 turn['input_tokens_est'] += call['input_tokens_est']
                 turn['output_tokens_est'] += actual_output
                 # Update per-config latency fields (BUG 5 fix). Attribute to the
-                # RESOLVED model when this call's endpoint was resolved (BUG_0273
+                # RESOLVED model when this call's endpoint was resolved (
                 # follow-up): a use_last_endpoint call's llm_calls + latency land on
                 # the endpoint that actually served it (dflash2), NOT its configured
                 # template model (Swift-1.5). Falls back to the configured fp when no
@@ -1657,7 +1656,7 @@ class TelemetryCollector:
             turn = self._active_turns.get(instance_name)
             if turn:
                 turn['tool_calls'] += 1
-                # Per-turn time breakdown (BUG_0129), split like the session total.
+                # Per-turn time breakdown, split like the session total.
                 if is_call_agent:
                     turn['call_agent_latency_ms'] += latency_ms
                 else:
@@ -1819,7 +1818,7 @@ class TelemetryCollector:
             # this reset the first post-compression call (smaller prompt, cached=0)
             # would be miscounted as waste. Set a post-compression marker so the next
             # call starts a fresh baseline AND is not counted as a cold-start waste
-            # (its re-prefill is a necessary consequence of the compression, BUG_0281).
+            # (its re-prefill is a necessary consequence of the compression).
             self._cache_scan_state[instance_name] = {
                 'prev_prompt_tokens': 0,
                 'prev_ts_ms': int(time.time() * 1000),
@@ -1883,7 +1882,7 @@ class TelemetryCollector:
         n_skills: int,
         char_count: int,
     ):
-        """Record one non-empty hint block delivered to the model (BUG_0311).
+        """Record one non-empty hint block delivered to the model.
 
         Observability-only: called at the single hint-surface choke point in
         ``memory_hint/manager.py`` right after ``_deliver``. Mirrors ``record_compression``
@@ -1909,7 +1908,7 @@ class TelemetryCollector:
         self._write_event(event)
 
     def record_memory_actioned(self, instance_name: str, rel_path: str):
-        """Record the FIRST read of a hinted lesson back (BUG_0311).
+        """Record the FIRST read of a hinted lesson back.
 
         Called from ``on_memory_read`` only when ``rel_path`` was still present in the
         instance's ``_recently_hinted`` map at read time AND had not been read before — i.e.
@@ -1946,7 +1945,7 @@ class TelemetryCollector:
         total_streaming_time_sec = stats.get('total_streaming_time_ms', 0) / 1000
 
         # TPS numerator must be the streamed subset: non-streaming calls have
-        # output tokens but no streaming time (BUG_0133).
+        # output tokens but no streaming time.
         avg_tps = (stats.get('total_streamed_output_tokens', 0) / total_streaming_time_sec
                    if total_streaming_time_sec > 0 else 0)
         avg_llm_latency = stats['total_llm_latency_ms'] / stats['total_llm_calls'] if stats['total_llm_calls'] > 0 else 0
@@ -1962,7 +1961,7 @@ class TelemetryCollector:
         _cache_total = stats.get('llm_cache_hits', 0) + stats.get('llm_cache_misses', 0)
         llm_cache_hit_ratio = round(stats.get('llm_cache_hits', 0) / _cache_total, 3) if _cache_total > 0 else None
 
-        # Hint effectiveness (BUG_0311): fraction of posted memory-hint entries the
+        # Hint effectiveness: fraction of posted memory-hint entries the
         # instance read back. None when nothing was posted, so a fresh session reports
         # "n/a" rather than a misleading 0%.
         _hint_mem_entries = stats.get('hint_memory_entries', 0)
@@ -2019,7 +2018,7 @@ class TelemetryCollector:
             'skill_advisor_calls': stats.get('skill_advisor_calls', 0),
             'skill_advisor_denials': stats.get('skill_advisor_denials', 0),
             'skill_advisor_fallbacks': stats.get('skill_advisor_fallbacks', 0),
-            # ── Hint usage (BUG_0311) ──────────────────────────────────────────
+            # ── Hint usage ──────────────────────────────────────────
             # Additive observability of the hint path (no generation change). The
             # skill-side action-rate is NOT derived here: it comes read-only from
             # skill_manager.get_metrics() at the API layer (a superset approximation —
@@ -2037,7 +2036,7 @@ class TelemetryCollector:
             'llm_cache_hit_ratio': llm_cache_hit_ratio,
             # Coverage, NOT a hit rate: fraction of ALL LLM calls that were classifiable
             # (classified/total). Distinct from llm_cache_hit_ratio above, which is
-            # hits/(hits+misses) over only the classified calls. (BUG_0260)
+            # hits/(hits+misses) over only the classified calls.
             'llm_cache_classified_ratio': llm_cache_classified_ratio,
             # ── Cache-waste diagnosis (borrow-audit #7) ─────────────────────────
             # Wasted prompt tokens + how many misses were detected, provider-agnostic.
@@ -2052,7 +2051,7 @@ class TelemetryCollector:
             # and consumers never render a misleading "$0".
             **({'session_cost': round(stats.get('session_cost', 0.0), 6)}
                if stats.get('session_cost', 0.0) > 0 else {}),
-            # ── Raw time totals (BUG_0130) ──────────────────────────────────────
+            # ── Raw time totals ──────────────────────────────────────
             # Exposed so the session cards/tables can be reconciled without re-adding
             # averages. All are agent-exclusive work sums; with parallel agents they
             # can exceed real elapsed time.
@@ -2089,7 +2088,7 @@ class TelemetryCollector:
             result = []
             for fp, cs in self._config_stats.items():
                 # Filter rows that served no LLM call so EVERY surface agrees (API,
-                # web UI via app.js, and the system_info dump) — BUG_0273 follow-up.
+                # web UI via app.js, and the system_info dump).
                 # A ``use_last_endpoint`` agent's CONFIGURED template row (e.g.
                 # Swift-1.5) served nothing: its call was re-keyed to the resolved
                 # endpoint, so this row carries 0 llm_calls and must not appear as a
@@ -2101,7 +2100,7 @@ class TelemetryCollector:
                 total_time_sec = cs['total_duration_ms'] / 1000 if cs['total_duration_ms'] > 0 else 0
                 # Per-turn averages are NOT computable when runs==0 — true for a
                 # resolved-keyed row whose run was counted at turn start on the
-                # configured fingerprint (BUG_0273). Emit None ("not computable")
+                # configured fingerprint. Emit None ("not computable")
                 # rather than 0, which would falsely read as "instant / no tokens".
                 avg_turn_time = cs['total_duration_ms'] / cs['runs'] if cs['runs'] > 0 else None
                 avg_tokens_per_turn = total_tokens / cs['runs'] if cs['runs'] > 0 else None
@@ -2120,12 +2119,12 @@ class TelemetryCollector:
                         'success_rate': round((count - failures) / count * 100, 1) if count > 0 else 100.0,
                     }
 
-                # Prompt-cache counters + derived hit ratio (BUG_0260). Same formula
+                # Prompt-cache counters + derived hit ratio. Same formula
                 # as the session-level llm_cache_hit_ratio: hits/(hits+misses), None
                 # when nothing classified. .get(...,0) tolerates rows persisted before
                 # the field existed.
                 #
-                # BUG_0338 bridge: since BUG_0273, classified cache hits/misses are
+                # Bridge: since the endpoint re-keying, classified cache hits/misses are
                 # attributed to the RESOLVED endpoint (the per-endpoint _cache_stats
                 # bucket, keyed ``api_base|model``), so the model-only row's own
                 # ``cache_hits``/``cache_misses`` stay 0 in normal operation and the
@@ -2186,7 +2185,7 @@ class TelemetryCollector:
         return result
 
     def get_cache_attribution(self) -> List[Dict]:
-        """Per-ENDPOINT cache hit/miss attribution (BUG_0273 Option A).
+        """Per-ENDPOINT cache hit/miss attribution (Option A).
 
         The model-only ``config_fingerprint`` groups A/B rows by model and cannot
         distinguish the endpoint that actually served a call, so attributing
@@ -2219,7 +2218,7 @@ class TelemetryCollector:
         return result
 
     def get_dna_comparison(self) -> List[Dict]:
-        """Per-DNA-version stats for A/B DNA comparison (BUG_0337 Phase 1).
+        """Per-DNA-version stats for A/B DNA comparison (Phase 1).
 
         A PARALLEL view to ``get_config_comparison`` (which groups by model only).
         Rows are keyed by ``dna_version`` and carry the counters that were flushed
@@ -2423,16 +2422,16 @@ class TelemetryCollector:
             summary = self.get_session_summary()
             config_comparison = self.get_config_comparison()
             # Persist the agent-class and skill tables too, so the JSONL can
-            # reproduce every dashboard table offline (BUG_0129); previously only
+            # reproduce every dashboard table offline; previously only
             # the config comparison was written.
             agent_class_comparison = self.get_agent_class_summary()
             skill_usage = self.get_skill_usage_summary()
-            # Per-endpoint cache attribution (BUG_0273 Option A), persisted so
+            # Per-endpoint cache attribution (Option A), persisted so
             # historical hits/misses can be re-keyed offline to confirm the global
             # model row's hit ratio recovers once last-endpoint misses are booked
             # to their own resolved endpoint.
             cache_attribution = self.get_cache_attribution()
-            dna_comparison = self.get_dna_comparison()   # BUG_0337 Phase 1
+            dna_comparison = self.get_dna_comparison()   # Phase 1
 
         event = {
             'type': 'session_end',
@@ -2443,7 +2442,7 @@ class TelemetryCollector:
             'cache_attribution': cache_attribution,
             'agent_class_comparison': agent_class_comparison,
             'skill_usage': skill_usage,
-            'dna_comparison': dna_comparison,           # BUG_0337 Phase 1 (additive)
+            'dna_comparison': dna_comparison,           # Phase 1 (additive)
         }
         try:
             self.write_checkpoint()      # raw-state snapshot for the next resume
@@ -2470,7 +2469,7 @@ class TelemetryCollector:
             raise_on_error: If True, raises on I/O failure (for critical events like session_end).
                            If False, logs warning and increments write_failures counter.
         """
-        # BUG_0337 Phase 1 (additive): stamp every telemetry record with the DNA
+        # Stamp every telemetry record with the DNA
         # version that produced it. Module constants, read once per record; both the
         # JSONL line and the in-memory events buffer get the fields (the fields land
         # here, not in the model-only fingerprint — the DNA label is threaded
@@ -2500,7 +2499,7 @@ class TelemetryCollector:
                     fh.flush()
                     self._log_file = fh  # Update cached handle for future writes
 
-                # BUG_0400 (a): periodic checkpoint cadence. Bump the counter under the
+                # Periodic checkpoint cadence. Bump the counter under the
                 # lock so it is atomic with the write, and count only real events (never
                 # the 'telemetry_stats' checkpoints themselves) so the cadence means
                 # "every N real events". When the interval is crossed we ALSO reset the

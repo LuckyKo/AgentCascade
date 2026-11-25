@@ -56,7 +56,7 @@ DEFAULT_SECURITY_DISABLED_TOOLS: frozenset[str] = frozenset({
 # Default disabled tools for Compressor agent (static class-default fallback baseline).
 # Compressor agent needs all tools disabled — it only performs compression internally.
 # Best-effort static completion only; the authoritative all-tools union is forced at runtime in
-# _configure_compressor_instance (agent_invoker.py) — see BUG_0373.
+# _configure_compressor_instance (agent_invoker.py).
 DEFAULT_COMPRESSOR_DISABLED_TOOLS: frozenset[str] = frozenset({
     'calculate',  # Evaluate mathematical expressions
     'call_agent',  # Delegate tasks to specialized agent instances
@@ -222,7 +222,7 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'memory_hint_cooldown_seconds',
     'memory_hint_skill_suggestions',
         'memory_hint_skill_threshold',
-    # Skill auto-load (BUG_0263) — propagated so tool-level reads see the live toggle/threshold.
+    # Skill auto-load — propagated so tool-level reads see the live toggle/threshold.
     # The manager reads pool.llm_cfg live; added alongside memory_hint_skill_threshold for consistency.
     'memory_hint_skill_autoload_enabled',
     'memory_hint_skill_autoload_threshold',

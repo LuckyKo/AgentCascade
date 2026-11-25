@@ -52,16 +52,16 @@ class ConfigPersistMixin:
                     data['work_access_folders_rw'] = [str(p) for p in om.extra_work_folders_rw]
                     data['default_workspace'] = str(om.base_dir)
 
-                # Add auto_security (BUG_0029): persist the LIVE pool flag — it is always
+                # Add auto_security: persist the LIVE pool flag — it is always
                 # a real bool after __init__, so no shadow check needed.
                 data['auto_security'] = bool(self.auto_security)
 
-                # Add enable_stack_swap + stack_restore_on_boot (BUG_0345)
+                # Add enable_stack_swap + stack_restore_on_boot
                 from agent_cascade import settings as _ac_settings
                 data['enable_stack_swap'] = bool(_ac_settings.ENABLE_STACK_SWAP)
                 data['stack_restore_on_boot'] = bool(_ac_settings.STACK_RESTORE_ON_BOOT)
 
-                # Add approval timeout settings (BUG_0029 Phase 2 Step 5: read from state directly)
+                # Add approval timeout settings (read from state directly)
                 from agent_cascade.runtime_state import state as _runtime_state
                 data['enable_approval_timeout'] = _runtime_state.enable_timeout
                 data['approval_timeout_seconds'] = _runtime_state.approval_timeout_seconds
@@ -74,7 +74,7 @@ class ConfigPersistMixin:
                 # Add async shell console window toggle
                 data['enable_async_shell_console_window'] = bool(self._enable_async_shell_console_window)
 
-                # Add compression_fraction as percentage (BUG_0029 Phase 2: read from live state)
+                # Add compression_fraction as percentage (read from live state)
                 data['compression_fraction'] = round(_runtime_state.compression_fraction * 100, 1)
 
                 # Preserve the one-time class-defaults migration sentinel across saves. This method
@@ -187,7 +187,7 @@ class ConfigPersistMixin:
             if default_workspace_raw:
                 self._pending_default_workspace = default_workspace_raw
 
-            # Store auto_security (BUG_0029): populate the LIVE pool flag AND keep the
+            # Store auto_security: populate the LIVE pool flag AND keep the
             # persistence shadow so launchers can detect "persisted value present".
             if auto_security_raw is not None:
                 self.auto_security = bool(auto_security_raw)
@@ -215,7 +215,7 @@ class ConfigPersistMixin:
             if enable_async_shell_console_window_raw is not None:
                 self._enable_async_shell_console_window = bool(enable_async_shell_console_window_raw)
 
-            # Apply compression_fraction from disk if present (BUG_0029 Phase 2: single writer)
+            # Apply compression_fraction from disk if present (single writer)
             compression_fraction_raw = data.pop('compression_fraction', None)
             if compression_fraction_raw is not None:
                 try:
@@ -342,7 +342,7 @@ class ConfigPersistMixin:
                     except (ValueError, TypeError):
                         pass
 
-                # ── Skill auto-load (BUG_0263) — restore 2 keys into llm_cfg ──
+                # ── Skill auto-load — restore 2 keys into llm_cfg ──
                 # Coercion/clamp is byte-identical to the config handlers so the disk-restore
                 # and UI-update paths can never disagree on a value.
                 val = data.pop('memory_hint_skill_autoload_enabled', None)
@@ -586,7 +586,7 @@ class ConfigPersistMixin:
         or vice versa (e.g. tool_dispatcher lowercases to 'security' but key is 'Security'),
         this will still find it.
 
-        Also performs BUG_0235 mtime-based staleness detection: templates are a startup
+        Also performs mtime-based staleness detection: templates are a startup
         cache, so without this an on-disk soul edit is never served to agents spawned
         later in the same process. See _reload_template_if_stale() for the full design.
 
@@ -616,7 +616,7 @@ class ConfigPersistMixin:
         if template is None:
             return None
 
-        # BUG_0235: single os.stat staleness check. get_template is called at spawn and a
+        # Single os.stat staleness check. get_template is called at spawn and a
         # few times per turn (engine/run_loop.py, engine/llm_call.py) but never on the
         # tokenization hot path, so a ~1us stat syscall here is negligible.
         source_path = self._template_source.get(key)
@@ -644,7 +644,7 @@ class ConfigPersistMixin:
         return self._reload_template_if_stale(key, source_path, current_mtime)
 
     def _reload_template_if_stale(self, key: str, source_path: str, current_mtime: float) -> Optional[Assistant]:
-        """Reload a single template after its soul file's mtime changed (BUG_0235).
+        """Reload a single template after its soul file's mtime changed.
 
         Mirrors refresh_agents()'s before/after + conditional-notify pattern, but scoped
         to one template. The swap is committed and notify_config_changed() fired ONLY when
@@ -704,7 +704,7 @@ class ConfigPersistMixin:
             return
         with self._ui_disabled_tools_lock:
             self._ui_disabled_tools = dict(disabled_tools_dict)
-        # Lazy-MCP all-disabled→off hook (BUG_0310 directive #3): if every tool of an MCP
+        # Lazy-MCP all-disabled→off hook: if every tool of an MCP
         # server is now disabled for EVERY agent, turn that server off — suppress it so it
         # will not connect (and disconnect it if somehow live). Re-enabling any of its tools
         # restores connectability (handled inside apply_ui_disabled). Gated on

@@ -96,7 +96,7 @@ def _wrap_untrusted(tool_name: str, result):
 # Async control verbs that only inspect or terminate an ALREADY-RUNNING background task.
 # They spawn nothing, consume no LLM/GPU slot, and must stay reachable while the pool is
 # paused — otherwise a paused pool makes a stuck run both unobservable and un-abortable
-# (BUG_0343: a __status call sat in the pause gate for 5 minutes). __wait is deliberately
+# (a __status call sat in the pause gate for 5 minutes). __wait is deliberately
 # excluded: it blocks by design and should honor the pause.
 _PAUSE_EXEMPT_CONTROL_VERBS: frozenset[str] = frozenset({'__status', '__kill', '__ctrl_c'})
 
@@ -130,7 +130,7 @@ class ToolExecMixin:
 
         Status/kill/interrupt control verbs for an already-running async task are exempt:
         they spawn nothing, use no LLM/GPU slot, and must stay reachable while paused
-        (BUG_0343: a __status call otherwise sat in this gate for five minutes).
+        (a __status call otherwise sat in this gate for five minutes).
         """
         if _is_pause_exempt_control_call(tool_name, tool_args):
             return

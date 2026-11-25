@@ -19,7 +19,7 @@ from agent_cascade.session_state_store import DEFAULT_SESSION_NAME
 from agent_cascade.ws_helpers import _clear_caches_safely, _validate_disabled_tools
 
 
-# ── WS message-envelope schema (BUG_0336) ──────────────────────────────────
+# ── WS message-envelope schema ──────────────────────────────────
 # Single source of truth for the ``type`` wire values and the envelope field
 # names, shared by BOTH the dispatch table and the response builders.
 #
@@ -122,7 +122,7 @@ class WsEnvelope:
 
 def _msg_identity(msg) -> tuple:
     """Stable identity key for a message (timestamp + content), used to map a displayed
-    (trimmed-pool) message to its counterpart in the FULL on-disk history (Fix BUG_0007).
+    (trimmed-pool) message to its counterpart in the FULL on-disk history.
 
     Handles both dict and Message-object forms. Falls back to ('', '') when either field is
     missing so identity comparison degrades gracefully rather than crashing."""
@@ -383,7 +383,7 @@ class WsMessageHandler:
 
         transitioned = 0
         # Instances we force-transition to IDLE here. Their in-flight telemetry turn
-        # must be closed below (BUG_0287) — record the names as we go.
+        # must be closed below — record the names as we go.
         closed_turn_instances = []
         for inst_name, instance in list(agent_pool.instances.items()):
             try:
@@ -410,7 +410,7 @@ class WsMessageHandler:
         # Halt threads, release slots, and unblock pending approvals
         agent_pool.stop_session()
 
-        # BUG_0287: Stop transitions agents to IDLE directly in this handler and
+        # Stop transitions agents to IDLE directly in this handler and
         # bypasses the engine's _run_finalize (engine/run_loop.py) — the only other
         # record_turn_end call site. Without this, the stopped turn stays open in
         # TelemetryManager._active_turns and the next record_turn_start discards it
@@ -1411,7 +1411,7 @@ class WsMessageHandler:
                 await asyncio.to_thread(snapshot.snapshot_stack, self.agent_pool, trigger='restart')
             except Exception as e:
                 logger.warning('[STACK_SWAP] restart autosave failed (non-fatal): %s', e)
-        # BUG_0400 (c): os.execl replaces the process image (no SIGTERM/atexit/finally),
+        # os.execl replaces the process image (no SIGTERM/atexit/finally),
         # so the graceful-shutdown telemetry checkpoint never fires on this path. Flush
         # the live aggregates to a final checkpoint while they are still in RAM. Guarded
         # so a missing pool can't block the restart; write_checkpoint is best-effort.
@@ -1604,7 +1604,7 @@ class WsMessageHandler:
 
             # Filter to known keys only (silently skip unknown fields).
             # Uses the registry-derived allowlist (includes the 7 disk-only keys that the
-            # historical POOL_SETTINGS_KEYS|EXTRA_PERSIST_KEYS dropped — BUG_0214 fix).
+            # historical POOL_SETTINGS_KEYS|EXTRA_PERSIST_KEYS dropped).
             filtered_cfg = {k: v for k, v in settings_json.items() if k in EXPORT_IMPORT_ALLOWLIST}
 
             if not filtered_cfg:
@@ -1624,7 +1624,7 @@ class WsMessageHandler:
                 _apply_ui_config(self.agent_pool, instance_name, filtered_cfg)
 
             # Handle auto_security if present in import data.
-            # BUG_0029: routes through the single writer (pool.set_auto_security) — this is
+            # Routes through the single writer (pool.set_auto_security) — this is
             # no longer a separate "third writer"; there is exactly one writer now.
             if 'auto_security' in settings_json:
                 if self.agent_pool and hasattr(self.agent_pool, 'set_auto_security'):
@@ -1869,7 +1869,7 @@ class WsMessageHandler:
     async def handle_set_auto_security(self, data: dict) -> None:
         """Handle 'set_auto_security' — toggle Auto-Ask mode.
 
-        BUG_0029 Phase 2 Step 6: calls state.set_auto_security directly (single setter).
+        Calls state.set_auto_security directly (single setter).
         The pool's set_auto_security wraps this with change-detection + persistence, so
         we call through the pool when available for the save-on-change behaviour.
         """
@@ -1971,7 +1971,7 @@ class WsMessageHandler:
     async def handle_edit_message(self, data: dict) -> None:
         """Handle 'edit_message' — edit a message in conversation history.
 
-        Fix BUG_0007: apply the edit by identity to BOTH the trimmed pool and the FULL on-disk
+        Apply the edit by identity to BOTH the trimmed pool and the FULL on-disk
         history (design §5.2), then rewrite the file from the full list. The old code rewrote
         the whole file from the trimmed pool, destroying pre-marker raw history.
         """
@@ -2043,7 +2043,7 @@ class WsMessageHandler:
                             applied = True
                         edited_full.append(fmsg)
 
-                    # Fix BUG_0007 (#1): if the file is non-empty but the target identity was
+                    # If the file is non-empty but the target identity was
                     # NOT found (pool/file content drift), we must NOT write `edited_full` — it
                     # would silently persist a full-history file LACKING an edit the UI already
                     # shows as applied. Safer choice for data integrity: fall back to writing
@@ -2070,7 +2070,7 @@ class WsMessageHandler:
     async def handle_delete_messages(self, data: dict) -> None:
         """Handle 'delete_messages' — prune messages from conversation.
 
-        Fix BUG_0007: operate on the FULL on-disk history (design §5.2), not the trimmed
+        Operate on the FULL on-disk history (design §5.2), not the trimmed
         pool working set. The UI's `indices` refer to the DISPLAYED (trimmed) list, so each
         is resolved to its file message by identity (timestamp + content), then removed from
         the full list. The file is rewritten from that full list with the shrink guard ARMED —
@@ -2115,7 +2115,7 @@ class WsMessageHandler:
                 continue
             new_full.append(msg)
 
-        # Fix BUG_0007 (#4): a requested identity that was never matched means the pool and
+        # A requested identity that was never matched means the pool and
         # on-disk file have drifted (e.g. content edited elsewhere). Behavior is unchanged, but
         # surface the desync so it's visible instead of silently dropped.
         if remaining_keys:

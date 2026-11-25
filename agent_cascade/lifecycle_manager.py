@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
 
 
-# ── L1 prefix-stability lint (BUG_0278) ──────────────────────────────────────
+# ── L1 prefix-stability lint ──────────────────────────────────────
 # llama.cpp's KV prefix cache only hits while the leading prompt prefix —
 # conversation[0] — is byte-identical between runs. For "stable" system-agent
 # classes (STABLE_SYSTEM_PROMPT_CLASSES) the RUNTIME gate in
@@ -52,10 +52,10 @@ _VOLATILE_PREFIX_PATTERNS = (
 _STABLE_PREFIX_CONSTANT_LINE = re.compile(r'^\s*-\s*System:\s*AgentCascade\b')
 
 
-# ── Spawn brief size observability (BUG_0285) ─────────────────────────────────
+# ── Spawn brief size observability ─────────────────────────────────
 # Worker sub-agents re-send their full ~13-15k system harness cold on every spawn
 # (the STABLE_SYSTEM_PROMPT_CLASSES enrollment that would make it cacheable is the
-# risky, user-pulled fix — see BUG_0285). Until that is decoupled, oversized
+# risky, user-pulled fix). Until that is decoupled, oversized
 # call_agent briefs silently inflate that cold prefix. This constant is the
 # pure-observability threshold: build_task_message warns when the context or task
 # param exceeds it (~1.4k tokens). Warn only — no truncation, no rejection, no
@@ -292,7 +292,7 @@ class AgentLifecycleManager:
         if old_parent is not None:
             self.pool._update_child_relationship(old_parent, inst.instance_name, add=False)
 
-        # BUG_0405: clear a reused TERMINATED instance's stale termination signal.
+        # Clear a reused TERMINATED instance's stale termination signal.
         # find_or_create_instance explicitly permits reusing an instance whose state is IDLE OR
         # TERMINATED (the AFK-Admin direct-run dispatch relies on this for session continuity). This fix
         # lives in the shared _prepare_instance_for_reuse helper for consistency with its "both reuse
@@ -481,7 +481,7 @@ class AgentLifecycleManager:
             if status.startswith('Error'):
                 logger.warning(f"[LOG_FILE_LOAD] Failed to load session for '{instance_name}': {status}")
                 if status.startswith('Error: Log file not found'):
-                    # BUG_0207: a missing log file is a hard error, not a warn-and-continue.
+                    # A missing log file is a hard error, not a warn-and-continue.
                     # Other load errors (corrupt file, no messages) keep the existing
                     # warn-and-continue behavior.
                     raise LogFileNotFoundError(log_file)
@@ -492,7 +492,7 @@ class AgentLifecycleManager:
                 logger.info(f"[LOG_FILE_LOAD] Loaded session for '{instance_name}': {status}")
                 session_was_loaded = True
 
-                # BUG_0032: A resurrected instance must not be pre-terminated. The name-scoped
+                # A resurrected instance must not be pre-terminated. The name-scoped
                 # pool.terminated_instances set is NOT cleared by load_session_from_log (it only
                 # swaps the instance object), so a stale entry left behind by a prior
                 # terminate_instance() with no clean thread-join (sub-agent names never register a
@@ -510,7 +510,7 @@ class AgentLifecycleManager:
                     logger.info(f"[LOG_FILE_LOAD] Cleared stale termination marker for "
                                 f"'{instance_name}' so the restored session can run.")
 
-        # BUG_0052 (Change A): give the child a back-reference to the pool so release_slot_permit can
+        # Give the child a back-reference to the pool so release_slot_permit can
         # recover the router via holder._pool_ref.api_router (slot_queue.py:578). Without this, call_agent
         # children (registered directly here, not via pool/lifecycle.py:90) silently skip the
         # _last_released_endpoint write + committed-marker cleanup on release. Set UNCONDITIONALLY on the
@@ -571,7 +571,7 @@ class AgentLifecycleManager:
         task_text = args.get('task', '')
         context_text = args.get('context', '')
 
-        # BUG_0285: flag oversized briefs (they inflate the worker's cold-prefix
+        # Flag oversized briefs (they inflate the worker's cold-prefix
         # cost). Measures the raw context/task params as passed to call_agent,
         # BEFORE caller_prefix/budget wrapping below. Warn only — pure
         # observability; the returned message is built identically afterwards.
@@ -653,7 +653,7 @@ class AgentLifecycleManager:
         _stamp_identity_to_instance_name(sys_msg, instance.instance_name)
         _inject_metadata_into_message(sys_msg, self.pool, instance)
 
-        # L1 (BUG_0278) prefix-stability guard. Stable system-agent classes reuse their KV
+        # L1 prefix-stability guard. Stable system-agent classes reuse their KV
         # prefix, so conversation[0] must not carry a per-run volatile field.
         # _build_session_metadata gates them at runtime; this asserts the rendered block
         # came out clean so drift is surfaced. A volatile field is a cache MISS (perf), not
@@ -699,7 +699,7 @@ class AgentLifecycleManager:
 
                 # FIX #4: Clear is_terminated flag
                 instance.is_terminated = False
-                # BUG_0205: clear the loop-termination reason so a reused child doesn't
+                # Clear the loop-termination reason so a reused child doesn't
                 # report a stale cause on a later, unrelated termination.
                 instance._terminated_reason = None
 
@@ -998,7 +998,7 @@ class AgentLifecycleManager:
                 # (matches execution_engine.py)
                 if not target_type:
                     target_type = getattr(instance, 'agent_class', '') or ''
-                # BUG_0242: Read the live pool entry for the child's class FIRST.
+                # Read the live pool entry for the child's class FIRST.
                 # A live pool entry is explicit user config for that class, but the
                 # caller's _generate_cfg_override may be None (unwarmed caller, and
                 # the reuse path which nulls it in initialize_conversation). Resolving
@@ -1061,7 +1061,7 @@ class AgentLifecycleManager:
                 merged = merge_disabled_tools(merged, child_disabled_from_caller_cfg)
 
                 # Check live pool config for real-time tool updates.
-                # (BUG_0242: pool_entry was already read above for the baseline
+                # (pool_entry was already read above for the baseline
                 # decision; re-unioning it here is idempotent and keeps caller
                 # explicit disables additive.)
                 merged = merge_disabled_tools(merged, pool_entry)
