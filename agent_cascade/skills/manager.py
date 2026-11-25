@@ -1020,6 +1020,14 @@ class SkillManager:
             final_active = active_before
             info_last = info  # last iteration's fresh classification (for the audit log below)
 
+            # Cache mode (BUG_0404 Phase 2): when the task-aware skill cache is on, cache_evict_tick
+            # OWNS eviction/sizing — the legacy rebalance absolute-gate + cap-draw must NOT run in
+            # parallel and one-way-ratchet USELESS/UNPROVEN away (plan §2.4 "repurpose the rebalance
+            # thread"; §2.6: USELESS/UNPROVEN are no longer auto-evictors, BAD is handled by the
+            # prefetch veto). Captured once here. False (inert) when the cache is OFF → the OFF path
+            # below is byte-identical. Re-enable stays the rebalance's responsibility.
+            cache_owns_eviction = self._cache_enabled()
+
             for iteration in range(1, max_iterations + 1):
                 iterations = iteration
 
@@ -1071,6 +1079,11 @@ class SkillManager:
                 to_evict_list = sorted(abs_evict | cap_evict,
                                        key=lambda nm: eviction_rank_key(info[nm]['class'], info[nm]['score'], nm))
                 to_evict_list = to_evict_list[:max_ev]
+                if cache_owns_eviction:
+                    # cache_evict_tick owns eviction: drop this pass's eviction union (both the
+                    # applied SET and the reported LIST, so nothing is applied and nothing is
+                    # reported). Re-enable below still runs. Inert when the cache is OFF.
+                    to_evict_list = []
                 to_evict = set(to_evict_list)
 
                 # Re-enable ranking stays on the legacy _rank_key, but BUG_0314 §3 item 4 restricts the
@@ -2334,25 +2347,31 @@ class SkillManager:
         if not commit:
             return decided
         # Apply admission (additive only — never evicts, so it cannot disturb a working agent).
+        # Re-validate under the lock: a manual disable landing between the snapshot and now must
+        # never be auto-revived (plan §2.5). Only flip skills that survive re-validation.
+        admitted: List[str] = []
         with self._write_lock:
-            for name in decided:
-                self._disabled_names.discard(str(name).lower())
             with self._metrics_lock:
                 g = self._global_activity_turns
                 for name in decided:
                     key = str(name).lower()
                     exact = next((k for k in self._metrics if str(k).lower() == key), None)
                     entry = self._metrics.get(exact) if exact is not None else None
+                    if entry is not None and entry.get('inactive_reason') == REASON_MANUAL:
+                        continue  # operator disabled it since the snapshot — never auto-revive
                     if entry is None:
                         entry = _default_metrics_entry('active')
                         self._metrics[name] = entry
+                    self._disabled_names.discard(key)
                     entry['status'] = 'active'
                     entry['origin'] = ORIGIN_PROBATION
                     entry['prefetched_turn'] = g
                     if entry.get('inactive_reason') == REASON_CACHE:
                         entry['inactive_reason'] = None  # cache-evicted → serving again
-        self._refresh_registry_after_flip()
-        return decided
+                    admitted.append(name)
+        if admitted:
+            self._refresh_registry_after_flip()
+        return admitted
 
     def cache_evict_tick(self, *, commit: bool = False) -> List[str]:
         """Boundary-time eviction tick. When the active pool exceeds the target, retire the worst
@@ -2403,17 +2422,23 @@ class SkillManager:
                     '' if commit else ' (shadow)', len(victims), len(rows), target, victims)
         if not commit:
             return victims
+        # Re-validate under the lock: a victim may have been re-enabled/loaded since the decision
+        # snapshot, so only retire skills that are STILL active when the lock is held.
+        evicted: List[str] = []
         with self._write_lock:
-            for name in victims:
-                self._disabled_names.add(name)
             with self._metrics_lock:
                 for name in victims:
                     exact = next((k for k in self._metrics if str(k).lower() == name), None)
-                    if exact is not None:
-                        self._metrics[exact]['status'] = 'inactive'
-                        self._metrics[exact]['inactive_reason'] = REASON_CACHE
-        self._refresh_registry_after_flip()
-        return victims
+                    entry = self._metrics.get(exact) if exact is not None else None
+                    if entry is None or entry.get('status') != 'active':
+                        continue  # re-enabled / gone since the snapshot — don't retire a live skill
+                    self._disabled_names.add(str(name).lower())
+                    entry['status'] = 'inactive'
+                    entry['inactive_reason'] = REASON_CACHE
+                    evicted.append(name)
+        if evicted:
+            self._refresh_registry_after_flip()
+        return evicted
 
     def _refresh_registry_after_flip(self) -> None:
         """Make an in-memory active/inactive flip immediately servable (same post-flip step as

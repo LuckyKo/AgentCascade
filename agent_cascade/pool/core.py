@@ -416,6 +416,20 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         )
         self._candidate_eval_thread.start()
 
+        # §2.4 idle safety tick: eviction otherwise only runs at a root task boundary, so a
+        # long-idle pool never gets one. This slow periodic timer lets cache_evict_tick still drain
+        # probation TTL / an over-target active set while idle. cache_evict_tick self-gates on
+        # skill_cache_active_enabled → a no-op call (zero behavior change) when the cache is off.
+        from agent_cascade.settings import SKILL_CACHE_IDLE_TICK_SECONDS
+        self._skill_cache_idle_stop = threading.Event()
+        self._skill_cache_idle_thread = threading.Thread(
+            target=self._skill_cache_idle_loop,
+            args=(SKILL_CACHE_IDLE_TICK_SECONDS,),
+            name='skill-cache-idle-tick',
+            daemon=True,
+        )
+        self._skill_cache_idle_thread.start()
+
         # ── Memory-Hint System (feature: memory_hint, plan §2.2 / §6.3) ───────
         # Best-effort: the manager is always created (so a runtime UI toggle takes
         # effect without restart), but its worker + startup rescan only run when
@@ -460,6 +474,20 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
             except Exception as e:  # noqa: BLE001 — a gate hiccup must not kill the timer
                 logger.debug(f"Candidate eval tick failed (non-critical): {e}")
 
+    def _skill_cache_idle_loop(self, interval: float):
+        """§2.4 idle safety tick: periodically run cache_evict_tick so a long-idle pool (which never
+        reaches a root task boundary) still drains probation TTL / an over-target active set.
+
+        Unlike the candidate-eval net this does NOT skip when no agent is active — idleness is
+        exactly the case this tick exists for. cache_evict_tick self-gates on
+        skill_cache_active_enabled, so each call is a no-op when the cache is off (zero behavior
+        change, just a sleep)."""
+        while not self._skill_cache_idle_stop.wait(interval):
+            try:
+                self.skill_manager.cache_evict_tick()
+            except Exception as e:  # noqa: BLE001 — an idle tick hiccup must not kill the timer
+                logger.debug(f"Skill-cache idle tick failed (non-critical): {e}")
+
     def start(self):
         """Start background services (idle checker, etc.). Call after pool initialization."""
         self._idle.start()
@@ -485,6 +513,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 self._candidate_eval_stop.set()  # stop the candidate decision-gate timer
             except Exception as e:
                 logger.debug(f"Candidate eval timer shutdown failed (non-critical): {e}")
+            try:
+                self._skill_cache_idle_stop.set()  # stop the skill-cache idle safety tick
+            except Exception as e:
+                logger.debug(f"Skill-cache idle tick shutdown failed (non-critical): {e}")
             try:
                 # Stop the memory-hint worker (started in __init__ when enabled). Without
                 # this it keeps running after the pool stops — a stray daemon thread that
@@ -591,6 +623,18 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
                 _cet.join(timeout=2.0)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"Candidate eval thread join failed (non-critical): {e}")
+
+        # ── (2b) skill-cache idle tick: signal the timer, then bounded-join the thread ──
+        try:
+            self._skill_cache_idle_stop.set()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Skill-cache idle tick signal failed (non-critical): {e}")
+        _sit = getattr(self, '_skill_cache_idle_thread', None)
+        if isinstance(_sit, threading.Thread) and _sit.is_alive():
+            try:
+                _sit.join(timeout=2.0)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Skill-cache idle tick thread join failed (non-critical): {e}")
 
         # ── (3) memory-hint: sentinel stop, then bounded-join the worker ──
         _mhm = getattr(self, 'memory_hint_manager', None)

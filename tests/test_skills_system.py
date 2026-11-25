@@ -5145,3 +5145,31 @@ class TestSkillCachePhase2:
                                 conversation=[{'role': 'user', 'content': 'subtask'}])
         eng2._consume_turn(child, 2)
         assert rec2.calls == []
+
+    def test_rebalance_yields_eviction_to_cache(self, tmp_path):
+        """Finding 1: once the cache owns eviction, rebalance_active_skills must NOT one-way-ratchet
+        USELESS skills. The OFF path still evicts exactly as before (regression lock on byte-identical
+        OFF behavior); the ON path leaves them for cache_evict_tick (plan §2.6)."""
+        names = [f'r{i}' for i in range(30)]
+
+        def _corpus(mgr):
+            _bump_to(mgr, 200)  # counter=200 ⇒ all aged ⇒ none PROTECTED (fair window 50)
+            ent = {nm: _aged_entry(10, 9.0) for nm in names[:25]}   # 25 USEFUL (valuable)
+            ent.update({nm: _aged_entry(0, None) for nm in names[25:]})  # 5 USELESS (absolute gate)
+            _set_metrics(mgr, ent)
+
+        # OFF (hermetic, no pool → compiled SKILL_CACHE_ACTIVE_ENABLED=False): legacy behavior.
+        m_off = _rebalance_manager(tmp_path / 'off', names)
+        _corpus(m_off)
+        s_off = m_off.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200,
+                                              max_evictions_per_pass=1000)
+        assert len(s_off['evicted']) == 5   # OFF path: USELESS still retired (byte-identical lock)
+
+        # ON: identical corpus, cache enabled → rebalance applies ZERO evictions; the cache owns it.
+        m_on = _rebalance_manager(tmp_path / 'on', names)
+        m_on.pool = _cache_pool(skill_cache_active_enabled=True)
+        _corpus(m_on)
+        s_on = m_on.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200,
+                                            max_evictions_per_pass=1000)
+        assert s_on['evicted'] == []        # ON: nothing ratcheted; USELESS survive for the cache tick
+        assert all(m_on._metrics[nm]['status'] == 'active' for nm in names[25:])

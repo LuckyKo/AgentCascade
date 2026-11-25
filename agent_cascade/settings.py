@@ -1254,6 +1254,11 @@ SKILL_CACHE_PROBATION_TTL_TURNS: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_
 # Upper bound on evictions applied in a single cache_evict_tick, so one boundary
 # cannot sweep the active set. Bounds churn, independent of how far over target it is.
 SKILL_CACHE_MAX_EVICT_PER_TICK: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_MAX_EVICT_PER_TICK', '10'))
+# Slow idle safety tick (seconds). cache_evict_tick is otherwise reached only at a root task
+# boundary, so a pool that stays idle never triggers eviction; this timer drains probation TTL /
+# over-target active sets on long-idle pools too (plan §2.4). The tick self-gates on
+# skill_cache_active_enabled, so it is a no-op call (zero behavior change) when the cache is off.
+SKILL_CACHE_IDLE_TICK_SECONDS: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_IDLE_TICK_SECONDS', str(6 * 3600)))
 
 # ── Skill-scoring constants ──────────────────
 # Every formula/gate constant in the skill scoring is a named setting here. Each default
