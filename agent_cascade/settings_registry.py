@@ -79,7 +79,8 @@ _POOL_KEYS: Tuple[str, ...] = (
     'memory_hint_threshold', 'read_file_max_chars', 'retry_base_delay', 'retry_max_attempts', 'retry_max_delay',
     'safe_mode_auto_ram_floor_mb', 'safe_mode_auto_vram_floor_mb', 'security_check_timeout',
     'shell_char_limit', 'skill_active_max_cap', 'skill_active_min_cap', 'skill_active_target_k',
-    'skill_always_protected', 'skill_auto_invalidate_enabled', 'skill_fair_window_turns',
+    'skill_always_protected', 'skill_auto_invalidate_enabled', 'skill_cache_active_enabled',
+    'skill_cache_commit_enabled', 'skill_fair_window_turns',
     'skill_max_evictions_per_pass', 'skill_score_dq', 'skill_score_ghalf', 'skill_score_kq',
     'skill_score_nhalf', 'skill_score_nmin', 'skill_score_q0', 'skill_score_rflood',
     'skill_score_tau_turns', 'skill_selector_mode', 'sleeping_wakeup_interval', 'slot_queue_timeout_seconds',
@@ -140,6 +141,7 @@ _LLM_CFG_SOURCED: FrozenSet[str] = frozenset({
     'memory_hint_skill_autoload_threshold',
     'skill_auto_invalidate_enabled', 'skill_active_target_k', 'skill_active_min_cap',
     'skill_active_max_cap',
+    'skill_cache_active_enabled', 'skill_cache_commit_enabled',
     'skill_score_q0', 'skill_score_kq', 'skill_score_nhalf', 'skill_score_ghalf',
     'skill_score_rflood', 'skill_score_tau_turns', 'skill_score_dq', 'skill_score_nmin',
     'skill_fair_window_turns', 'skill_max_evictions_per_pass', 'skill_always_protected',
@@ -229,6 +231,9 @@ _SEED_DEFAULTS: Dict[str, Any] = {
     'memory_hint_skill_autoload_enabled': True,
     'memory_hint_skill_autoload_threshold': 3,
     'skill_auto_invalidate_enabled': True,
+    # Task-aware skill cache — master toggle (active) and commit mode both ON by default.
+    'skill_cache_active_enabled': True,
+    'skill_cache_commit_enabled': True,
     'skill_active_target_k': 1.0,
     'skill_active_min_cap': 20,
     'skill_active_max_cap': 200,
@@ -545,7 +550,7 @@ def spec(key: str) -> SettingSpec:
 
 #: Drift guard: the pinned sizes of the derived compat key sets. Adding/removing a
 #: persisted key updates these on purpose (a silent size change is a bug).
-_POOL_SETTINGS_KEY_COUNT: int = 113
+_POOL_SETTINGS_KEY_COUNT: int = 115
 _EXTRA_PERSIST_KEY_COUNT: int = 5
 
 

@@ -3117,6 +3117,9 @@ if __name__ == '__main__':
         'skill_active_target_k': 1.0,
         'skill_active_min_cap': 20,
         'skill_active_max_cap': 200,
+        # Task-aware skill cache — ON by default (full mode: active machinery + commit).
+        'skill_cache_active_enabled': True,
+        'skill_cache_commit_enabled': True,
         # Skill-scoring constants (research §5/§7/§18 + D-SAFE). Phase C reads these from llm_cfg
         # with identical defaults in pool/core.py and manager.py; the full 6-seam exposure
         # (config handlers, frontend inputs) lands in Phase E — seeding here keeps the keys

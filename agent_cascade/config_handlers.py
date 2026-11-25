@@ -826,6 +826,24 @@ def _handle_skill_auto_invalidate_enabled(ui_cfg: dict, agent_pool: Optional[Any
         agent_pool.llm_cfg['skill_auto_invalidate_enabled'] = bool(ui_cfg.get('skill_auto_invalidate_enabled', True))
 
 
+# ── Task-aware skill cache handlers (active-skill working set, plan §2) ──────
+# Read live from agent_pool.llm_cfg by SkillManager._cache_enabled() /
+# _cache_commit_enabled() (skills/manager.py), so a flip needs no restart. The UI
+# "Skill Cache" master toggle writes both keys together (full mode = both True).
+@register_config_handler('skill_cache_active_enabled')
+def _handle_skill_cache_active_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle the task-aware skill cache machinery (default ON = cache active)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['skill_cache_active_enabled'] = bool(ui_cfg.get('skill_cache_active_enabled', True))
+
+
+@register_config_handler('skill_cache_commit_enabled')
+def _handle_skill_cache_commit_enabled(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Toggle whether the skill cache applies its decisions vs shadow-logs (default ON)."""
+    if agent_pool is not None and hasattr(agent_pool, 'llm_cfg'):
+        agent_pool.llm_cfg['skill_cache_commit_enabled'] = bool(ui_cfg.get('skill_cache_commit_enabled', True))
+
+
 @register_config_handler('skill_always_protected')
 def _handle_skill_always_protected(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     """Comma-separated set of meta/process skills that are NEVER evicted by the rebalance pass.

@@ -45,6 +45,32 @@ def _skill_path(name: str) -> Path:
 
 
 # ===========================================================================
+# Per-suite skill-cache gate pinning
+# ===========================================================================
+
+@pytest.fixture(autouse=True)
+def _pin_skill_cache_gate(request, monkeypatch):
+    """Pin the skill-cache gate to the mode a suite ACTUALLY tests, via its ``CACHE_GATE``
+    class attribute (``False`` = legacy OFF-mode fallback evictor/scoring/count-cap;
+    ``True`` = the cache-on default). Classes that omit ``CACHE_GATE`` are left untouched.
+
+    Why this exists: pool-less hermetic managers fall back to the compiled
+    ``SKILL_CACHE_ACTIVE_ENABLED`` constant inside ``SkillManager._cache_enabled()``. That
+    default now ships ON, so without an explicit pin a suite built around the OFF-mode
+    fallback path would silently retarget to the cache path (and vice-versa) whenever the
+    default moves. Pinning per-suite keeps each suite exercising its intended code path and
+    makes that intent explicit instead of inherited from a (mutable) global default.
+
+    We patch the constant AS IMPORTED into ``agent_cascade.skills.manager`` — the exact
+    symbol ``_cache_enabled()`` reads — not ``agent_cascade.settings``.
+    """
+    gate = getattr(request.cls, 'CACHE_GATE', None)
+    if gate is None:
+        return
+    monkeypatch.setattr('agent_cascade.skills.manager.SKILL_CACHE_ACTIVE_ENABLED', gate)
+
+
+# ===========================================================================
 # Skill Invalidation (Phase 1) — helpers for hermetic skill trees
 # ===========================================================================
 
@@ -2259,6 +2285,7 @@ class TestResolveSkillPairsReenable:
     engine/core.py uses for sub-agent injection, NOT the runtime load_skill tool. Reuses the
     same hermetic fixtures + helpers as TestLoadSkillReenable above.
     """
+    CACHE_GATE = False  # OFF-mode: the legacy count-cap / re-enable fallback path
 
     def test_explicit_list_reenables_disabled_servable(self, hermetic_skill_manager, tmp_path):
         """#1: disabled-but-servable skill in an explicit list -> body returned AND re-enabled."""
@@ -2786,6 +2813,7 @@ def _status_of(m, name):
 
 class TestSkillInvalidationRebalance:
     """Phase 2: adaptive count-cap pass (target math, determinism, D-A, never-raises)."""
+    CACHE_GATE = False  # OFF-mode: the adaptive count-cap rebalance path
 
     @pytest.fixture(autouse=True)
     def _tmp(self, tmp_path):
@@ -3671,6 +3699,7 @@ def _bump_to(m, n: int) -> None:
 
 class TestSkillScoringRebalance:
     """Phase C: OR-composition, PROTECTED exclusion, class-ordinal ordering, D-SAFE cap, preview parity."""
+    CACHE_GATE = False  # OFF-mode: rebalance count-cap/scoring path
 
     @pytest.fixture(autouse=True)
     def _tmp(self, tmp_path):
@@ -3920,6 +3949,7 @@ class TestAlwaysProtectedSkills:
     read-only preview), which forces ``cls = CLASS_PROTECTED`` for any name in the always-protected
     set. Because both paths build their eviction candidate set from ``class != CLASS_PROTECTED``, a
     forced-PROTECTED skill is unreachable by EITHER gate (absolute OR count-cap)."""
+    CACHE_GATE = False  # OFF-mode: protection/eviction owned by rebalance when cache is OFF
 
     @pytest.fixture(autouse=True)
     def _tmp(self, tmp_path):
@@ -4621,6 +4651,7 @@ class TestSkillHintLedger:
 class TestValueDrivenCap:
     """BUG_0314: the active-count target now floats with N_valuable (PROTECTED ∪ USEFUL over the
     serve-candidate set), not the touched count. Pins the value/no-ratchet/headroom/UNPROVEN policy."""
+    CACHE_GATE = False  # OFF-mode: value-driven count-cap eviction path
 
     @pytest.fixture(autouse=True)
     def _tmp(self, tmp_path):
@@ -4820,6 +4851,7 @@ class TestConvergenceLoop:
     single boot (bounded loop) instead of requiring ~ceil(shortfall/max_ev) restarts. Pins the
     single-call drain, the per-pass D-SAFE bound that drives iteration count, the no-progress /
     max_ev=0 / already-at-target exits, and the [1,12] iteration cap."""
+    CACHE_GATE = False  # OFF-mode: rebalance convergence loop drives eviction itself
 
     @pytest.fixture(autouse=True)
     def _tmp(self, tmp_path):
@@ -5009,6 +5041,8 @@ class _CacheRec:
 
 
 class TestSkillCachePhase2:
+    CACHE_GATE = True   # ON-mode: this suite exercises the new cache-on default path
+
     def test_probation_promoted_to_demand_on_deliberate_load(self, tmp_path):
         """A deliberate load (agent_selected=True) 'confirms' a prefetched probation skill: it
         promotes to demand and drops its probation marker. An auto-load must NOT promote it."""
@@ -5089,9 +5123,11 @@ class TestSkillCachePhase2:
         assert m._metrics['cch']['status'] == 'active'
         assert m._metrics['cch']['inactive_reason'] is None  # reason cleared on revival
 
-        # negative control: the manual guard is cache-gated — with the cache OFF (pool-less manager)
-        # the pre-existing behavior re-enables even a manual_disabled skill.
-        m2 = make_hermetic_skill_manager(tmp_path)   # no pool → _cache_enabled() is False
+        # negative control: the manual guard is cache-gated — with the cache OFF the pre-existing
+        # behavior re-enables even a manual_disabled skill. Pinned OFF explicitly
+        # via a pool so it does not rely on the compiled SKILL_CACHE_ACTIVE_ENABLED default (now ON).
+        m2 = make_hermetic_skill_manager(tmp_path)
+        m2.pool = _cache_pool(skill_cache_active_enabled=False)   # explicit OFF gate
         m2._metrics['man'] = _default_metrics_entry('inactive')
         m2._metrics['man']['inactive_reason'] = REASON_MANUAL
         m2._disabled_names.add('man')
@@ -5178,8 +5214,9 @@ class TestSkillCachePhase2:
             ent.update({nm: _aged_entry(0, None) for nm in names[25:]})  # 5 USELESS (absolute gate)
             _set_metrics(mgr, ent)
 
-        # OFF (hermetic, no pool → compiled SKILL_CACHE_ACTIVE_ENABLED=False): legacy behavior.
+        # OFF: legacy behavior, cache gate pinned OFF explicitly (the compiled default is now ON).
         m_off = _rebalance_manager(tmp_path / 'off', names)
+        m_off.pool = _cache_pool(skill_cache_active_enabled=False)
         _corpus(m_off)
         s_off = m_off.rebalance_active_skills(k=1.0, min_cap=20, max_cap=200,
                                               max_evictions_per_pass=1000)

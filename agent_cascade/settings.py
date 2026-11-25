@@ -1232,22 +1232,23 @@ SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', 
 # When enabled, the active-skill pool is sized by a fixed target and managed by a
 # single eviction order (expired probation → remaining probation → demand LRU),
 # replacing the multiplier-driven sizing of rebalance_active_skills. Master switch
-# skill_cache_active_enabled defaults OFF: every cache method returns without
-# touching the pool, so the feature is fully inert until explicitly turned on.
+# skill_cache_active_enabled now defaults ON (full mode: machinery runs and, with
+# commit on, mutates the pool). Opt out via the UI "Skill Cache" toggle or
+# AGENT_CASCADE_SKILL_CACHE_ACTIVE_ENABLED=0 — then every cache method is a no-op.
 # The numeric settings are clamped to [SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_MAX_CAP]
 # by the cache itself so a stray value can't grow the pool beyond the hard ceiling.
-# Master switch for the task-aware skill cache. False (default) = complete no-op:
-# the prefetch worker and eviction tick short-circuit before reading or writing the
-# pool. True = machinery runs and logs its decisions; real enablement additionally
-# gated on the KV-prefix audit, so this flag landing OFF keeps production unchanged.
+# Master switch for the task-aware skill cache. True (default) = machinery runs: the
+# prefetch worker and eviction tick read and (when commit is on) write the pool.
+# False = complete no-op: every cache method short-circuits before touching the pool.
+# Defaults ON so the cache is live out of the box; opt out via the UI toggle or env var.
 SKILL_CACHE_ACTIVE_ENABLED: bool = (
-    os.getenv('AGENT_CASCADE_SKILL_CACHE_ACTIVE_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on'))
+    os.getenv('AGENT_CASCADE_SKILL_CACHE_ACTIVE_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on'))
 # Whether the skill cache ACTS on its decisions vs only logs them. Only consulted when
-# skill_cache_active_enabled is ON (the methods short-circuit first). False (default) =
-# shadow: prefetch/evict compute and log their choices but never mutate the active pool
-# (zero behavior change). True = computed admissions are applied and victims are retired.
+# skill_cache_active_enabled is ON (the methods short-circuit first). True (default) =
+# full mode: computed admissions are applied and victims are retired. False = shadow:
+# prefetch/evict compute and log their choices but never mutate the active pool.
 SKILL_CACHE_COMMIT_ENABLED: bool = (
-    os.getenv('AGENT_CASCADE_SKILL_CACHE_COMMIT_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on'))
+    os.getenv('AGENT_CASCADE_SKILL_CACHE_COMMIT_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on'))
 # Desired steady-state size of the active-skill pool (skills). Operating band 50-80.
 SKILL_CACHE_TARGET_SIZE: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_TARGET_SIZE', '60'))
 # Number of top-ranked inactive skills a root-task-boundary prefetch speculatively

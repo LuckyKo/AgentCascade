@@ -242,6 +242,8 @@ _GOLDEN_CORE = {
         'self-augmentation,skill-creator'
     ),
     'skill_auto_invalidate_enabled': True,
+    'skill_cache_active_enabled': True,
+    'skill_cache_commit_enabled': True,
     'skill_fair_window_turns': 50,
     'skill_max_evictions_per_pass': 25,
     'skill_score_dq': 0.5,
@@ -291,8 +293,8 @@ def test_stack_swap_keys_registry_coverage():
         _POOL_SETTINGS_KEY_COUNT,
     )
 
-    # Counts are pinned despite the two new keys: pool stays 113, extra persist is now 5.
-    assert _POOL_SETTINGS_KEY_COUNT == 113, 'pool key count must stay 113'
+    # Counts are pinned despite the two new keys: pool is now 115, extra persist is 5.
+    assert _POOL_SETTINGS_KEY_COUNT == 115, 'pool key count must stay 115'
     assert _EXTRA_PERSIST_KEY_COUNT == 5, 'extra-persist key count must be 5'
 
     for key in ('enable_stack_swap', 'stack_restore_on_boot'):

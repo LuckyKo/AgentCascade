@@ -870,10 +870,14 @@
                       </div>
                     </details>
 
-                    <!-- Skill Invalidation (adaptive count-cap) — ON by default -->
+                    <!-- Skill Cache — task-aware active-skill pool (ON by default) + adaptive count-cap -->
                     <details class="settings-section">
-                      <summary class="settings-section-title">Skill Invalidation</summary>
+                      <summary class="settings-section-title">Skill Cache</summary>
                       <div class="settings-section-body" style="margin:4px 0 8px 12px;padding:8px;border-left:2px solid #555;background:rgba(255,255,255,0.03);">
+                        <label class="setting-field toggle-field">
+                          <span title="Task-aware skill cache: speculatively prefetch likely skills and evict the least-recently-used to keep the active pool near target. ON = full mode (runs and applies). OFF = fully inert. On by default.">Enable Skill Cache</span>
+                          <input autocomplete="off" type="checkbox" id="setting-skill-cache-enabled" checked />
+                        </label>
                         <label class="setting-field toggle-field">
                           <span title="At startup, auto-retire (soft-inactivate) the lowest-ranked active skills to keep the active count near the adaptive target. On by default.">Enable Auto-Invalidate</span>
                           <input autocomplete="off" type="checkbox" id="setting-skill-invalidate-enabled" checked />

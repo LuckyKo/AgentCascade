@@ -231,6 +231,9 @@ POOL_SETTINGS_TO_BROADCAST: tuple[str, ...] = (
     'skill_active_target_k',
     'skill_active_min_cap',
     'skill_active_max_cap',
+    # Task-aware skill cache — master toggle (active) + commit mode, propagated live.
+    'skill_cache_active_enabled',
+    'skill_cache_commit_enabled',
     # Skill-scoring constants (research §5/§7/§18 + D-SAFE) — propagated so the frontend settings
     # response carries current values (mirrors how SKILL_ACTIVE_* reach the UI).
     'skill_score_q0',

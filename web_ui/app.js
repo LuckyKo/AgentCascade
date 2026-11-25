@@ -222,6 +222,8 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-memory-hint-cooldown', prop: 'value', key: 'memory_hint_cooldown_seconds' },
   // Skill invalidation (adaptive count-cap) — underscore keys via getGenerateCfg().
   { id: '#setting-skill-invalidate-enabled', prop: 'checked', key: 'skill_auto_invalidate_enabled' },
+  // Task-aware skill cache master toggle — single control; hydrates from active (commit mirrors it).
+  { id: '#setting-skill-cache-enabled', prop: 'checked', key: 'skill_cache_active_enabled' },
   { id: '#setting-skill-target-k', prop: 'value', key: 'skill_active_target_k' },
   { id: '#setting-skill-min-cap', prop: 'value', key: 'skill_active_min_cap' },
   { id: '#setting-skill-max-cap', prop: 'value', key: 'skill_active_max_cap' },
@@ -1556,6 +1558,8 @@ function saveSettings(sendToServer) {
   if ($('#setting-memory-hint-cooldown')) s['memory_hint_cooldown_seconds'] = $('#setting-memory-hint-cooldown').value;
   // Skill invalidation (adaptive count-cap): persist toggle + 3 numeric settings under underscore keys.
   if ($('#setting-skill-invalidate-enabled')) s['skill_auto_invalidate_enabled'] = $('#setting-skill-invalidate-enabled').checked;
+  // Task-aware skill cache: one master toggle writes BOTH keys together (full mode).
+  if ($('#setting-skill-cache-enabled')) { const _sc = $('#setting-skill-cache-enabled').checked; s['skill_cache_active_enabled'] = _sc; s['skill_cache_commit_enabled'] = _sc; }
   if ($('#setting-skill-target-k')) s['skill_active_target_k'] = $('#setting-skill-target-k').value;
   if ($('#setting-skill-min-cap')) s['skill_active_min_cap'] = $('#setting-skill-min-cap').value;
   if ($('#setting-skill-max-cap')) s['skill_active_max_cap'] = $('#setting-skill-max-cap').value;
@@ -6751,6 +6755,8 @@ function getGenerateCfg() {
   if ($('#setting-memory-hint-cooldown')) { const _mcd = parseFloat($('#setting-memory-hint-cooldown').value); cfg.memory_hint_cooldown_seconds = Number.isNaN(_mcd) ? 600 : Math.min(86400, Math.max(0, _mcd)); }
   // Skill invalidation (adaptive count-cap) — clamped to match the server-side config handlers.
   if ($('#setting-skill-invalidate-enabled')) cfg.skill_auto_invalidate_enabled = $('#setting-skill-invalidate-enabled').checked;
+  // Task-aware skill cache — single master toggle drives both keys (matches server defaults).
+  if ($('#setting-skill-cache-enabled')) { const _sc = $('#setting-skill-cache-enabled').checked; cfg.skill_cache_active_enabled = _sc; cfg.skill_cache_commit_enabled = _sc; }
   if ($('#setting-skill-target-k')) { const _stk = parseFloat($('#setting-skill-target-k').value); cfg.skill_active_target_k = Number.isNaN(_stk) ? 1.0 : Math.min(5.0, Math.max(0.1, _stk)); }
   if ($('#setting-skill-min-cap')) { const _smc = parseInt($('#setting-skill-min-cap').value); cfg.skill_active_min_cap = Number.isNaN(_smc) ? 20 : Math.min(200, Math.max(1, _smc)); }
   if ($('#setting-skill-max-cap')) { const _smx = parseInt($('#setting-skill-max-cap').value); const _smin = cfg.skill_active_min_cap ?? 20; cfg.skill_active_max_cap = Number.isNaN(_smx) ? 200 : Math.min(1000, Math.max(_smin, _smx)); }

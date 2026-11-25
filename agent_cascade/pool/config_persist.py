@@ -410,6 +410,16 @@ class ConfigPersistMixin:
                 if val is not None:
                     self.llm_cfg['skill_always_protected'] = format_skill_always_protected(val)
 
+                # ── Task-aware skill cache — restore both switches into llm_cfg ──
+                # Booleans: a MISSING key leaves llm_cfg unset so the manager falls back to the
+                # compiled SKILL_CACHE_* default (now ON); an explicit false persists the off state.
+                val = data.pop('skill_cache_active_enabled', None)
+                if val is not None:
+                    self.llm_cfg['skill_cache_active_enabled'] = bool(val)
+                val = data.pop('skill_cache_commit_enabled', None)
+                if val is not None:
+                    self.llm_cfg['skill_cache_commit_enabled'] = bool(val)
+
         except Exception as e:
             logger.error(
                 f"[PoolSettings] Failed to load settings from {self._pool_settings_path}: {e}. Using defaults.")
