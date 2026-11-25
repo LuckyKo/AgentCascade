@@ -1242,6 +1242,12 @@ SKILL_ACTIVE_MAX_CAP: int = int(os.getenv('AGENT_CASCADE_SKILL_ACTIVE_MAX_CAP', 
 # gated on the KV-prefix audit, so this flag landing OFF keeps production unchanged.
 SKILL_CACHE_ACTIVE_ENABLED: bool = (
     os.getenv('AGENT_CASCADE_SKILL_CACHE_ACTIVE_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on'))
+# Whether the skill cache ACTS on its decisions vs only logs them. Only consulted when
+# skill_cache_active_enabled is ON (the methods short-circuit first). False (default) =
+# shadow: prefetch/evict compute and log their choices but never mutate the active pool
+# (zero behavior change). True = computed admissions are applied and victims are retired.
+SKILL_CACHE_COMMIT_ENABLED: bool = (
+    os.getenv('AGENT_CASCADE_SKILL_CACHE_COMMIT_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on'))
 # Desired steady-state size of the active-skill pool (skills). Operating band 50-80.
 SKILL_CACHE_TARGET_SIZE: int = int(os.getenv('AGENT_CASCADE_SKILL_CACHE_TARGET_SIZE', '60'))
 # Number of top-ranked inactive skills a root-task-boundary prefetch speculatively

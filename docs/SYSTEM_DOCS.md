@@ -1697,6 +1697,19 @@ Scoring internals (`q0`, `kq`, `n_half`, `g_half`, `r_floor`, `tau_turns`, `δq`
 
 > **Not present here, by design:** there is no separate "zero-load suppression" gate in the hint pipeline. Suppression of never-used skills is handled here (the load-waste factor `w`, the `USELESS`/`BAD` classification, and the rebalance eviction), so the hint gate does not duplicate it.
 
+### 10.9 Task-Aware Skill Cache (`manager.py`, prefetch + probation-priority eviction)
+
+A speculative working-set cache that, at a root task boundary (and on a pool idle safety tick), **prefetches** inactive skills matching the task text (tagged `origin=probation`) and **evicts** over-target active skills in a probation-priority order. It is gated by two independent, env-backed switches so the default is a byte-for-byte no-op:
+
+| Flag (`llm_cfg` key / `AGENT_CASCADE_*` env) | Default | Off-state | On-state |
+|------|---------|-----------|----------|
+| `skill_cache_active_enabled` (`SKILL_CACHE_ACTIVE_ENABLED`) | off | every cache method short-circuits before reading the pool — fully inert | machinery runs, computes decisions, records them |
+| `skill_cache_commit_enabled` (`SKILL_CACHE_COMMIT_ENABLED`) | off | **shadow** — decisions are computed, logged, and recorded, but the pool is never mutated | decisions are **applied** (admit on prefetch, retire on evict) |
+
+`skill_cache_commit_enabled` is consulted only when `skill_cache_active_enabled` is ON (the methods short-circuit first), so the master-switch contract is unchanged: cache OFF ⇒ commit is never read ⇒ inert regardless. The commit flag is resolved live at the two production call sites (`engine/core.py::_run_skill_cache_boundary` and `pool/core.py::_skill_cache_idle_loop`) via `SkillManager._cache_commit_enabled()`, so a `llm_cfg['skill_cache_commit_enabled'] = True` flip needs no restart. Recommended rollout: shadow-first soak (`active=1, commit=0`) reading the new telemetry slice, then flip `commit=1`.
+
+**Telemetry** (read-only, surfaced as the `skill_cache` key of `/api/telemetry`): a single `_skill_cache_stats` dict on the `TelemetryCollector` (the manager keeps no copy) tracks `prefetch_admissions`, `evict_victims`, `evict_by_category` (`probation_expired`/`probation`/`demand`), `probation_promotions`, an `active_set_size` gauge, and the `shadow_decisions` vs `commit_decisions` split. Counters are recorded under the telemetry leaf lock only — never nested under the manager's `_metrics_lock`/`_write_lock` (the promotion record is deferred outside the metrics lock). Additive: a NEW top-level API key with a shape-stable `{}` fallback, existing telemetry fields and method signatures (`commit: bool = False`) untouched.
+
 ---
 
 ## 11. Tool System & MCP Discovery

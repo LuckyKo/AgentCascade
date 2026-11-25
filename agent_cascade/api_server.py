@@ -2350,7 +2350,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         """Return session telemetry summary and per-config comparison data."""
         if not (agent_pool and hasattr(agent_pool, 'telemetry') and agent_pool.telemetry):
             return {'session': {}, 'configs': [], 'agent_classes': [], 'skills': [],
-                    'recent_events': [], 'hints': {'hint_stats': {}, 'skill_table': []},
+                    'skill_cache': {}, 'recent_events': [], 'hints': {'hint_stats': {}, 'skill_table': []},
                     'evolution': _empty_skill_evolution_slice()}
         session = agent_pool.telemetry.get_session_summary()
         # BUG_0311 "hints" slice — read-only aggregation, no new counters, no schema
@@ -2390,6 +2390,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             'configs': agent_pool.telemetry.get_config_comparison(),
             'agent_classes': agent_pool.telemetry.get_agent_class_summary(),
             'skills': agent_pool.telemetry.get_skill_usage_summary(),
+            'skill_cache': agent_pool.telemetry.get_skill_cache_summary(),
             'recent_events': agent_pool.telemetry.get_recent_events(50),
             'hints': {'hint_stats': hint_stats, 'skill_table': skill_table},
             'evolution': evo_slice,

@@ -2480,3 +2480,85 @@ class TestSessionContinuity:
         assert dict(c2._session_stats['tool_calls_by_name']) == \
             dict(snap['_session_stats']['tool_calls_by_name'])
         c2.close()
+
+
+# ---------------------------------------------------------------------------
+# Skill-cache counters (task-aware cache telemetry slice)
+# ---------------------------------------------------------------------------
+
+class TestSkillCacheStats:
+    """The additive _skill_cache_stats aggregate: increments, defensive reads,
+    accumulation tolerance, and serialize→load round-trip survival (§1b+§1c)."""
+
+    def test_defaults_are_zero(self, collector):
+        s = collector.get_skill_cache_summary()
+        assert s == {
+            'prefetch_admissions': 0, 'evict_victims': 0, 'evict_by_category': {},
+            'probation_promotions': 0, 'active_set_size': 0,
+            'shadow_decisions': 0, 'commit_decisions': 0,
+        }
+
+    def test_counters_increment(self, collector):
+        collector.record_skill_cache_prefetch(commit=False, admitted=3)
+        collector.record_skill_cache_prefetch(commit=True, admitted=2)
+        collector.record_skill_cache_evict(commit=True, victims_by_category={'demand': 2, 'probation': 1})
+        collector.record_skill_cache_promotion()
+        collector.set_skill_cache_active_size(57)
+        s = collector.get_skill_cache_summary()
+        assert s['prefetch_admissions'] == 5        # 3 + 2 names
+        assert s['shadow_decisions'] == 1           # one non-commit decision event
+        assert s['commit_decisions'] == 2           # prefetch(commit) + evict(commit)
+        assert s['evict_victims'] == 3              # 2 demand + 1 probation
+        assert s['evict_by_category'] == {'demand': 2, 'probation': 1}
+        assert s['probation_promotions'] == 1
+        assert s['active_set_size'] == 57
+
+    def test_negative_counts_clamped_and_gauge_set_not_add(self, collector):
+        collector.record_skill_cache_prefetch(commit=False, admitted=-7)  # clamped to 0 names
+        collector.set_skill_cache_active_size(20)
+        collector.set_skill_cache_active_size(5)   # gauge SETS, does not add
+        s = collector.get_skill_cache_summary()
+        assert s['prefetch_admissions'] == 0
+        assert s['shadow_decisions'] == 1          # decision event still counted (admitted 0)
+        assert s['active_set_size'] == 5
+
+    def test_summary_is_defensive_copy(self, collector):
+        collector.record_skill_cache_evict(commit=False, victims_by_category={'probation_expired': 1})
+        s = collector.get_skill_cache_summary()
+        s['evict_by_category']['probation_expired'] = 999  # mutate nested + top-level
+        s['evict_victims'] = 999
+        assert collector.get_skill_cache_summary() == {
+            'prefetch_admissions': 0, 'evict_victims': 1, 'evict_by_category': {'probation_expired': 1},
+            'probation_promotions': 0, 'active_set_size': 0,
+            'shadow_decisions': 1, 'commit_decisions': 0,
+        }
+
+    def test_evict_by_category_accumulates_without_keyerror(self, collector):
+        collector.record_skill_cache_evict(commit=True, victims_by_category={'demand': 2})
+        collector.record_skill_cache_evict(commit=True, victims_by_category={'demand': 1, 'probation': 3})
+        s = collector.get_skill_cache_summary()
+        assert s['evict_by_category'] == {'demand': 3, 'probation': 3}
+        assert s['evict_victims'] == 6
+
+    def test_skill_cache_stats_roundtrip_survives_reload(self, tmp_path):
+        """_AGGREGATE_FIELDS (serialize) AND the _load_state restore tuple must both
+        carry the field — miss either and the counters silently reset to 0 on reload."""
+        d1 = str(tmp_path / 'c1')
+        d2 = str(tmp_path / 'c2')
+        c1 = TelemetryCollector(log_dir=d1, instance_id='unit_test')
+        c1.record_skill_cache_prefetch(commit=False, admitted=3)
+        c1.record_skill_cache_evict(commit=True, victims_by_category={'demand': 2})
+        c1.record_skill_cache_promotion()
+        c1.set_skill_cache_active_size(57)
+        snap = c1._serialize_state()
+        c1.close()
+
+        c2 = TelemetryCollector(log_dir=d2, instance_id='unit_test')
+        assert c2._skill_cache_stats['prefetch_admissions'] == 0   # fresh defaults
+        assert c2._load_state(snap) is True
+        assert c2.get_skill_cache_summary() == {
+            'prefetch_admissions': 3, 'evict_victims': 2, 'evict_by_category': {'demand': 2},
+            'probation_promotions': 1, 'active_set_size': 57,
+            'shadow_decisions': 1, 'commit_decisions': 1,
+        }
+        c2.close()

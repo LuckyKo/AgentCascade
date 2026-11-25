@@ -30,7 +30,8 @@ from agent_cascade.settings import (AUTO_SKILL_AUTO_PROMOTE, AUTO_SKILL_MIN_TURN
                                     CANDIDATE_MAX_PENDING_DAYS, CANDIDATE_MIN_RATINGS, LOAD_SKILL_AUTO,
                                     LOAD_SKILL_NONE, MAX_AUTO_SKILLS_PER_CALL, SKILL_ACTIVE_MAX_CAP,
                                     SKILL_ACTIVE_MIN_CAP, SKILL_ACTIVE_TARGET_K, SKILL_ALWAYS_PROTECTED_DEFAULT,
-                                    SKILL_CACHE_ACTIVE_ENABLED, SKILL_CACHE_MAX_EVICT_PER_TICK,
+                                    SKILL_CACHE_ACTIVE_ENABLED, SKILL_CACHE_COMMIT_ENABLED,
+                                    SKILL_CACHE_MAX_EVICT_PER_TICK,
                                     SKILL_CACHE_PREFETCH_TOP_K, SKILL_CACHE_PROBATION_TTL_TURNS,
                                     SKILL_CACHE_TARGET_SIZE, SKILL_CACHE_TTL_SECONDS, SKILL_FAIR_WINDOW_TURNS,
                                     SKILL_MATCH_THRESHOLD, SKILL_WALLCLOCK_SECONDS_PER_TURN,
@@ -1330,6 +1331,7 @@ class SkillManager:
 
         Flushes to disk when pending count reaches threshold OR 30 seconds have elapsed.
         """
+        promoted = False
         with self._metrics_lock:
             entry = self._metrics.setdefault(skill_name, {'total_loads': 0, 'by_version': {}})
             entry['total_loads'] += 1
@@ -1354,6 +1356,7 @@ class SkillManager:
                 if entry.get('origin') == ORIGIN_PROBATION:
                     entry['origin'] = ORIGIN_DEMAND
                     entry['prefetched_turn'] = None
+                    promoted = True
             entry['by_version'][version] = entry['by_version'].get(version, 0) + 1
             # Real "last used" supersedes any migration seed (schema 1.3). Multi-instance
             # last-writer-wins = most recently used; runs under _metrics_lock like the counters.
@@ -1371,6 +1374,13 @@ class SkillManager:
                 flush_needed = True
             else:
                 flush_needed = False
+
+        # Deferred outside the metrics lock: the telemetry leaf must never be nested under
+        # _metrics_lock. A deliberate load that promoted probation→demand is recorded here.
+        if promoted:
+            tel = self._cache_tel()
+            if tel is not None:
+                tel.record_skill_cache_promotion()
 
         if flush_needed:
             self._flush_metrics_to_disk()
@@ -2255,6 +2265,21 @@ class SkillManager:
             return bool(cfg['skill_cache_active_enabled'])
         return bool(SKILL_CACHE_ACTIVE_ENABLED)
 
+    def _cache_commit_enabled(self) -> bool:
+        """Commit switch (apply decisions vs log-only), read live so a config change applies
+        without restart; same fallback shape as _cache_enabled. Only consulted when the cache
+        is active — the cache methods short-circuit before reaching it when inactive."""
+        pool = getattr(self, 'pool', None)
+        cfg = getattr(pool, 'llm_cfg', None) if pool is not None else None
+        if isinstance(cfg, dict) and 'skill_cache_commit_enabled' in cfg:
+            return bool(cfg['skill_cache_commit_enabled'])
+        return bool(SKILL_CACHE_COMMIT_ENABLED)
+
+    def _cache_tel(self):
+        """Telemetry collector for the skill-cache counters, or None (a pool-less unit-test
+        manager). Cache record calls skip silently when this returns None."""
+        return getattr(getattr(self, 'pool', None), 'telemetry', None)
+
     def _cache_num(self, key: str, default: int) -> int:
         """Numeric cache setting: live llm_cfg override, else the compiled default (clamped at use)."""
         pool = getattr(self, 'pool', None)
@@ -2343,6 +2368,9 @@ class SkillManager:
         decided = decided[:top_k]
         logger.info('[SKILL-CACHE] prefetch%s admitted=%d/%d %s',
                     '' if commit else ' (shadow)', len(decided), top_k, decided)
+        tel = self._cache_tel()
+        if tel is not None:
+            tel.record_skill_cache_prefetch(commit=commit, admitted=len(decided))
         if not commit:
             return decided
         # Apply admission (additive only — never evicts, so it cannot disturb a working agent).
@@ -2398,6 +2426,9 @@ class SkillManager:
                 'last_load_turn': v.get('last_load_turn'),
             }) for k, v in self._metrics.items()
                 if isinstance(v, dict) and v.get('status') == 'active']
+        tel = self._cache_tel()
+        if tel is not None:
+            tel.set_skill_cache_active_size(len(rows))
         if len(rows) <= target:
             return []
         budget = min(max_ev, len(rows) - target)
@@ -2414,11 +2445,23 @@ class SkillManager:
         expired = sorted([p for p in prob if p[0] > ttl], key=lambda p: (-p[0], p[1]))
         fresh_prob = sorted([p for p in prob if p[0] <= ttl], key=lambda p: (-p[0], p[1]))
         demand.sort(key=lambda p: (p[0], p[1]))  # LRU: least-recently-loaded first
-        victims = [name for _, name in (expired + fresh_prob + demand)[:budget]]
+        # Tag each victim with its category in the SAME concatenation order as the previous
+        # (expired + fresh_prob + demand)[:budget], so the chosen victims list is byte-for-byte
+        # what it was; the tags only add the per-category counts for telemetry.
+        tagged = ([(name, 'probation_expired') for _, name in expired]
+                  + [(name, 'probation') for _, name in fresh_prob]
+                  + [(name, 'demand') for _, name in demand])
+        chosen = tagged[:budget]
+        victims = [name for name, _ in chosen]
+        victims_by_category: Dict[str, int] = {}
+        for _name, cat in chosen:
+            victims_by_category[cat] = victims_by_category.get(cat, 0) + 1
         if not victims:
             return []
         logger.info('[SKILL-CACHE] evict%s victims=%d pool=%d target=%d %s',
                     '' if commit else ' (shadow)', len(victims), len(rows), target, victims)
+        if tel is not None:
+            tel.record_skill_cache_evict(commit=commit, victims_by_category=victims_by_category)
         if not commit:
             return victims
         # Re-validate under the lock: a victim may have been re-enabled/loaded since the decision

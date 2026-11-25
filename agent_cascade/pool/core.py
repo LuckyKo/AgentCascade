@@ -477,9 +477,10 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
 
     def _skill_cache_idle_loop(self, interval: float):
         """Idle safety tick: periodically run cache_evict_tick so a long-idle pool (which never
-        reaches a root task boundary) still gets its eviction decisions evaluated. Production calls
-        it with commit=False, so it shadow-observes (logs) probation TTL / over-target eviction
-        candidates rather than performing real eviction until commit is enabled.
+        reaches a root task boundary) still gets its eviction decisions evaluated. The commit
+        flag is resolved live from skill_cache_commit_enabled, so it shadow-observes (logs)
+        probation TTL / over-target eviction candidates while that flag is off, and performs real
+        eviction only once both the active and commit flags are on.
 
         Unlike the candidate-eval net this does NOT skip when no agent is active — idleness is
         exactly the case this tick exists for. cache_evict_tick self-gates on
@@ -487,7 +488,8 @@ class AgentPool(LifecycleMixin, ConversationMixin, MessageQueueMixin, SlotsMixin
         change, just a sleep)."""
         while not self._skill_cache_idle_stop.wait(interval):
             try:
-                self.skill_manager.cache_evict_tick()
+                self.skill_manager.cache_evict_tick(
+                    commit=self.skill_manager._cache_commit_enabled())
             except Exception as e:  # noqa: BLE001 — an idle tick hiccup must not kill the timer
                 logger.debug(f"Skill-cache idle tick failed (non-critical): {e}")
 

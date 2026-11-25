@@ -4995,6 +4995,9 @@ class _CacheRec:
     def _cache_enabled(self):
         return True
 
+    def _cache_commit_enabled(self):
+        return False  # shadow default — boundary worker must still record prefetch+evict
+
     def bump_activity_turn(self):
         pass
 
@@ -5020,6 +5023,23 @@ class TestSkillCachePhase2:
         m._increment_load_count('auto', '1.0.0', agent_selected=False)
         assert m._metrics['auto']['origin'] == ORIGIN_PROBATION
         assert m._metrics['auto']['prefetched_turn'] == 5
+
+        # Telemetry: attach a mock collector. A deliberate load that promotes must call
+        # record_skill_cache_promotion() exactly once (deferred outside _metrics_lock); an
+        # auto-load promotes nothing and records nothing. The manager was pool-less above, so
+        # _cache_tel() returned None and no record happened — now we exercise the recorded path.
+        from unittest.mock import Mock
+        tel = Mock()
+        m.pool = SimpleNamespace(llm_cfg={}, telemetry=tel)
+        m._metrics['tel'] = _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=9)
+        m._increment_load_count('tel', '1.0.0', agent_selected=True)
+        assert m._metrics['tel']['origin'] == ORIGIN_DEMAND
+        assert tel.record_skill_cache_promotion.call_count == 1
+        tel.record_skill_cache_promotion.reset_mock()
+        m._metrics['tel_auto'] = _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=9)
+        m._increment_load_count('tel_auto', '1.0.0', agent_selected=False)
+        assert m._metrics['tel_auto']['origin'] == ORIGIN_PROBATION
+        assert tel.record_skill_cache_promotion.call_count == 0
 
     def test_eviction_victim_order_and_per_tick_cap(self, tmp_path):
         """Over-target eviction retires expired-probation → remaining-probation (oldest prefetch
@@ -5173,3 +5193,148 @@ class TestSkillCachePhase2:
                                             max_evictions_per_pass=1000)
         assert s_on['evicted'] == []        # ON: nothing ratcheted; USELESS survive for the cache tick
         assert all(m_on._metrics[nm]['status'] == 'active' for nm in names[25:])
+
+
+class TestSkillCacheCommitAndWiring:
+    """Commit flag honored at the behavior layer (shadow vs active) AND actually threaded
+    (passed) at the two production call sites (the wiring layer)."""
+
+    def _over_target_manager(self, tmp_path, tel):
+        """7-active corpus (4 over a target of 3) with a mock collector on the pool.
+        Victim order is deterministic: ep(expired prob) p_old p_new d_none."""
+        m = make_hermetic_skill_manager(tmp_path)
+        m.pool = _cache_pool(skill_cache_probation_ttl_turns=5, skill_cache_max_evict_per_tick=10)
+        m.pool.telemetry = tel
+        m._global_activity_turns = 100
+        m._cache_target = lambda: 3
+        m._metrics = {
+            'ep':    _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=0),   # expired, oldest
+            'p_old': _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=96),  # fresh (age 4<ttl), oldest
+            'p_new': _cache_active_entry(origin=ORIGIN_PROBATION, prefetched_turn=98),  # fresh, newest
+            'd_none': _cache_active_entry(last_load_turn=None),  # demand, never loaded → next victim
+            'd_old': _cache_active_entry(last_load_turn=10),
+            'd_mid': _cache_active_entry(last_load_turn=50),
+            'prot':  _cache_active_entry(last_load_turn=100),    # within fair window → protected
+        }
+        return m
+
+    def _prefetch_seed_manager(self, tmp_path):
+        """One servable INACTIVE (cache-evicted) skill on disk that matches 'zebra quantum'.
+
+        Mirrors the evict-commit fixture's seed-the-state style, but the admit path runs the
+        REAL match_skills (include_inactive=True), so the skill must be discoverable on disk —
+        not just present in _metrics. Seed inactive via REASON_CACHE (not disable_skill, which
+        sets REASON_MANUAL and is vetoed by prefetch's never-auto-revive guard)."""
+        m = make_hermetic_skill_manager(tmp_path)
+        root = tmp_path / 'prefetch_skills'
+        # G+C3 min-2 token gate: 'zebra quantum' shared by name/desc/trigger (same trick as
+        # TestScanSkillsInactiveMatch, proven to match a 'zebra quantum' query).
+        _write_named_skill(root, 'cache-zebra', 'zebra quantum fixture', 'zebra quantum')
+        m._cache_ttl = 0.0
+        m.discover([root])
+        m.pool = _cache_pool(skill_cache_commit_enabled=True)
+        # Cache-evicted → servable inactive: REASON_CACHE (auto-revivable), not REASON_MANUAL.
+        with m._metrics_lock:
+            m._metrics['cache-zebra'] = _default_metrics_entry('inactive')
+            m._metrics['cache-zebra']['inactive_reason'] = REASON_CACHE
+        m._disabled_names.add('cache-zebra')
+        return m
+
+    def test_admit_shadow_records_without_mutating(self, tmp_path):
+        """active ON + commit OFF: prefetch decides the candidate but mutates nothing —
+        symmetric twin of the evict shadow test."""
+        m = self._prefetch_seed_manager(tmp_path)
+        decided = m.prefetch_for_task('zebra quantum', commit=False)
+        assert 'cache-zebra' in decided                      # decision computed
+        assert m._metrics['cache-zebra']['status'] != 'active'   # NOT flipped to active
+        assert m._metrics['cache-zebra']['status'] == 'inactive'
+        assert m._metrics['cache-zebra']['origin'] is None       # no probation tag applied
+        assert 'cache-zebra' in m._disabled_names               # not re-enabled
+
+    def test_admit_commit_activates_as_probation(self, tmp_path):
+        """active ON + commit ON: the matching cache-evicted skill is admitted — status flips to
+        active, origin=probation, removed from _disabled_names (symmetric twin of the evict-commit
+        test, which flips the opposite direction to inactive/REASON_CACHE)."""
+        m = self._prefetch_seed_manager(tmp_path)
+        admitted = m.prefetch_for_task('zebra quantum', commit=True)
+        assert 'cache-zebra' in admitted
+        assert m._metrics['cache-zebra']['status'] == 'active'
+        assert m._metrics['cache-zebra']['origin'] == ORIGIN_PROBATION
+        assert 'cache-zebra' not in m._disabled_names          # re-served
+
+    def test_evict_shadow_records_without_mutating(self, tmp_path):
+        """active ON + commit OFF: victims decided and recorded, pool untouched."""
+        from unittest.mock import Mock
+        tel = Mock()
+        m = self._over_target_manager(tmp_path, tel)
+        victims = m.cache_evict_tick(commit=False)
+        assert victims == ['ep', 'p_old', 'p_new', 'd_none']
+        assert all(v['status'] == 'active' for v in m._metrics.values())   # zero mutation
+        tel.set_skill_cache_active_size.assert_called_once_with(7)        # gauge set even on a shadow tick
+        tel.record_skill_cache_evict.assert_called_once_with(
+            commit=False, victims_by_category={'probation_expired': 1, 'probation': 2, 'demand': 1})
+        tel.record_skill_cache_promotion.assert_not_called()
+
+    def test_evict_commit_applies_and_records_commit(self, tmp_path):
+        """active ON + commit ON: victims flipped to inactive/REASON_CACHE; commit recorded."""
+        from unittest.mock import Mock
+        tel = Mock()
+        m = self._over_target_manager(tmp_path, tel)
+        victims = m.cache_evict_tick(commit=True)
+        assert victims == ['ep', 'p_old', 'p_new', 'd_none']
+        for nm in victims:
+            assert m._metrics[nm]['status'] == 'inactive'
+            assert m._metrics[nm]['inactive_reason'] == REASON_CACHE
+        assert m._metrics['prot']['status'] == 'active'   # protected survivor untouched
+        tel.record_skill_cache_evict.assert_called_once_with(
+            commit=True, victims_by_category={'probation_expired': 1, 'probation': 2, 'demand': 1})
+
+    def test_evict_default_kwarg_is_shadow(self, tmp_path):
+        """Default-path twin: omitting commit= behaves as shadow — proves opt-in, not always-on."""
+        from unittest.mock import Mock
+        tel = Mock()
+        m = self._over_target_manager(tmp_path, tel)
+        victims = m.cache_evict_tick()   # kwarg omitted → method default commit=False
+        assert victims == ['ep', 'p_old', 'p_new', 'd_none']
+        assert all(v['status'] == 'active' for v in m._metrics.values())
+        tel.record_skill_cache_evict.assert_called_once()
+        assert tel.record_skill_cache_evict.call_args.kwargs['commit'] is False
+
+    def test_boundary_worker_threads_commit_flag(self):
+        """Wiring layer: the REAL engine worker resolves the flag live and PASSES it to both
+        prefetch and evict. Assert the targeted call list is non-empty before the all()."""
+        from unittest.mock import MagicMock
+        from agent_cascade.engine.core import ExecutionEngine
+        sm = MagicMock()
+        sm._cache_commit_enabled.return_value = True
+        ExecutionEngine._run_skill_cache_boundary(None, sm, 'task text')
+        targeted = sm.prefetch_for_task.call_args_list + sm.cache_evict_tick.call_args_list
+        assert targeted, 'boundary worker must call prefetch and/or evict'
+        assert all((c.kwargs or {}).get('commit') is True for c in targeted)
+        # negative twin: flag off → commit threaded as False.
+        sm2 = MagicMock()
+        sm2._cache_commit_enabled.return_value = False
+        ExecutionEngine._run_skill_cache_boundary(None, sm2, 'task text')
+        assert sm2.prefetch_for_task.call_args.kwargs['commit'] is False
+        assert sm2.cache_evict_tick.call_args.kwargs['commit'] is False
+
+    def test_pool_idle_tick_threads_commit_flag(self):
+        """Wiring layer: the REAL pool idle safety tick resolves the flag live and passes it.
+        Driven with a stubbed stop event (one body pass, then the loop exits — no sleeping)."""
+        from unittest.mock import MagicMock
+        from agent_cascade.pool.core import AgentPool
+        sm = MagicMock()
+        sm._cache_commit_enabled.return_value = True
+        stop = MagicMock()
+        stop.wait.side_effect = [False, True]   # one body run, then exit
+        AgentPool._skill_cache_idle_loop(SimpleNamespace(skill_manager=sm, _skill_cache_idle_stop=stop), 0.0)
+        targeted = sm.cache_evict_tick.call_args_list
+        assert targeted, 'idle tick must still call cache_evict_tick'
+        assert all((c.kwargs or {}).get('commit') is True for c in targeted)
+        # negative twin: flag off → commit threaded as False.
+        sm2 = MagicMock()
+        sm2._cache_commit_enabled.return_value = False
+        stop2 = MagicMock()
+        stop2.wait.side_effect = [False, True]
+        AgentPool._skill_cache_idle_loop(SimpleNamespace(skill_manager=sm2, _skill_cache_idle_stop=stop2), 0.0)
+        assert sm2.cache_evict_tick.call_args.kwargs['commit'] is False

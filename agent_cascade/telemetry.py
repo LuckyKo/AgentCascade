@@ -73,7 +73,7 @@ _CONFIG_STATS_DEFAULTDICTS = {
 #: distinct from the derived ``get_session_summary`` tables.
 _AGGREGATE_FIELDS = (
     '_session_stats', '_config_stats', '_cache_stats', '_instance_usage',
-    '_agent_class_stats', '_dna_stats', '_skill_usage_stats',
+    '_agent_class_stats', '_dna_stats', '_skill_usage_stats', '_skill_cache_stats',
 )
 
 from agent_cascade.instance_id import get_instance_id, make_instance_dir
@@ -236,6 +236,24 @@ class TelemetryCollector:
         # this session, which agent classes loaded it, and the acquisition-mode
         # breakdown (explicit / auto / advisor / self-augmentation / runtime).
         self._skill_usage_stats: Dict[str, Dict] = {}
+
+        # Task-aware skill-cache counters: session-lifetime decision totals for the
+        # prefetch/eviction cache, surfaced read-only under /api/telemetry 'skill_cache'.
+        # Single source of truth — the SkillManager keeps no copy and only calls the
+        # record_skill_cache_* methods below. Flat ints plus one nested category bucket;
+        # active_set_size is a last-observed gauge (pool size at the last evict tick).
+        # Reset/serialize like every other aggregate (see _AGGREGATE_FIELDS). Defined
+        # here, before the _empty_aggregate_template capture below, so a fresh-stack
+        # reset zeroes it for free with no dedicated reset code.
+        self._skill_cache_stats: Dict = {
+            'prefetch_admissions': 0,   # Σ skill names prefetch decided to admit
+            'evict_victims': 0,         # Σ victim names eviction selected
+            'evict_by_category': {},    # {probation_expired|probation|demand: victim count}
+            'probation_promotions': 0,  # probation→demand flips (prefetch paid off)
+            'active_set_size': 0,       # gauge: active-pool size at last evict tick
+            'shadow_decisions': 0,      # decision events logged but NOT applied
+            'commit_decisions': 0,      # decision events actually applied to the pool
+        }
 
         # Frozen zeroed snapshot of every aggregate dict, used to reset to a clean
         # slate when attach_session switches to a target stack that has no stored
@@ -499,7 +517,8 @@ class TelemetryCollector:
                         for key, factory in _CONFIG_STATS_DEFAULTDICTS.items():
                             row[key] = defaultdict(factory, row.get(key, {}))
                 self._config_stats = config
-            for name in ('_cache_stats', '_instance_usage', '_agent_class_stats', '_dna_stats'):
+            for name in ('_cache_stats', '_instance_usage', '_agent_class_stats', '_dna_stats',
+                         '_skill_cache_stats'):
                 value = payload.get(name)
                 if isinstance(value, dict):
                     setattr(self, name, value)
@@ -2323,6 +2342,57 @@ class TelemetryCollector:
                 })
         result.sort(key=lambda r: (-r['loads'], r['skill']))
         return result
+
+    def record_skill_cache_prefetch(self, *, commit: bool, admitted: int) -> None:
+        """One prefetch boundary decision: *admitted* skills selected, applied (commit) or
+        logged-only (shadow). Increments are atomic under the telemetry lock."""
+        with _telemetry_lock:
+            s = self._skill_cache_stats
+            s['prefetch_admissions'] = s.get('prefetch_admissions', 0) + max(0, int(admitted))
+            key = 'commit_decisions' if commit else 'shadow_decisions'
+            s[key] = s.get(key, 0) + 1
+
+    def record_skill_cache_evict(self, *, commit: bool, victims_by_category: Dict[str, int]) -> None:
+        """One eviction-tick decision: victims per category, applied or logged-only.
+        Accumulates into evict_by_category with .get/setdefault tolerance so a pre-feature
+        or hand-built dict never KeyErrors."""
+        with _telemetry_lock:
+            s = self._skill_cache_stats
+            by_cat = s.setdefault('evict_by_category', {})
+            total = 0
+            for cat, n in (victims_by_category or {}).items():
+                n = int(n); total += max(0, n)
+                by_cat[cat] = by_cat.get(cat, 0) + max(0, n)
+            s['evict_victims'] = s.get('evict_victims', 0) + total
+            key = 'commit_decisions' if commit else 'shadow_decisions'
+            s[key] = s.get(key, 0) + 1
+
+    def record_skill_cache_promotion(self) -> None:
+        """A probation skill was confirmed by a deliberate load → promoted to demand."""
+        with _telemetry_lock:
+            s = self._skill_cache_stats
+            s['probation_promotions'] = s.get('probation_promotions', 0) + 1
+
+    def set_skill_cache_active_size(self, size: int) -> None:
+        """Gauge: active-pool size observed at the last eviction tick."""
+        with _telemetry_lock:
+            self._skill_cache_stats['active_set_size'] = max(0, int(size))
+
+    def get_skill_cache_summary(self) -> Dict:
+        """Defensive snapshot of the skill-cache counters for the /api/telemetry slice.
+        Returns a copy so callers iterate without holding the lock; totals are flat
+        integers, evict_by_category a copied dict — all stable keys, never raises."""
+        with _telemetry_lock:
+            s = self._skill_cache_stats
+            return {
+                'prefetch_admissions': s.get('prefetch_admissions', 0),
+                'evict_victims': s.get('evict_victims', 0),
+                'evict_by_category': dict(s.get('evict_by_category', {})),
+                'probation_promotions': s.get('probation_promotions', 0),
+                'active_set_size': s.get('active_set_size', 0),
+                'shadow_decisions': s.get('shadow_decisions', 0),
+                'commit_decisions': s.get('commit_decisions', 0),
+            }
 
     def get_recent_events(self, count: int = DEFAULT_RECENT_EVENT_COUNT) -> List[Dict]:
         """Get the most recent N events."""
