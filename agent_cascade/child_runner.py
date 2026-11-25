@@ -46,7 +46,7 @@ def _extract_task_block(output: str) -> str:
     if matches:
         return matches[-1].strip()
     # No [TASK]…[END] block: the Admin skipped the block, or the block lives in a
-    # different message than the one extracted (BUG_0406 root-cause candidate A).
+    # different message than the one extracted (root-cause candidate A).
     # Log the (truncated) output for offline diagnosis, then fall back to the whole
     # message so the dispatch still posts a usable task.
     logger.warning(
@@ -294,7 +294,7 @@ def _termination_reason(pool, instance_name: str, inst, was_stopped: bool, resul
     except Exception:
         comp = False
 
-    # BUG_0205: loop-recovery exhaustion is the most specific, actionable cause — check it
+    # Loop-recovery exhaustion is the most specific, actionable cause — check it
     # first. The loop detector records a machine-readable reason on the instance
     # (agent_instance._terminated_reason) before terminating it. Strict isinstance guard:
     # a bare MagicMock instance auto-creates truthy attributes, so a mock inst must still
@@ -380,7 +380,7 @@ def run_child_core(
         force_fresh = _determine_force_fresh(agent_class)
 
     _child_start = time.monotonic()  # Slice 3: elapsed for the completion message
-    # BUG_0326: capture the pre-run subtree baseline so the completion tag reports
+    # Capture the pre-run subtree baseline so the completion tag reports
     # the PER-CALL delta (this call's generated tokens/cost), not the instance's
     # lifetime total (call_agent reuses instances by name, so the accumulator
     # persists across calls). Fresh instances read 0 here.
@@ -426,14 +426,14 @@ def run_child_core(
     # Verified: llm_call.py produces "[SYSTEM ERROR: <msg>]" for every fatal/timeout path.
     if result and result.strip().startswith('[SYSTEM ERROR'):
         # The system-error text IS the cause; still append the log path + last step so the
-        # parent can recover partial work without guessing (BUG_0083).
+        # parent can recover partial work without guessing.
         detail = _failure_detail(pool, instance_name, inst, conv,
                                 reason=result.strip())
         raise ChildAgentFailedError(f"Sub-agent '{instance_name}' failed: {result.strip()}\n{detail}")
     # Termination is also a failure for the parent (child didn't produce useful output)
     if was_terminated and result:
         # Base message kept an exact prefix so callers/match assertions still pass; the
-        # detail adds reason + log path + last-step hint (BUG_0083).
+        # detail adds reason + log path + last-step hint.
         reason = _termination_reason(pool, instance_name, inst, was_stopped, result)
         detail = _failure_detail(pool, instance_name, inst, conv, reason=reason)
         raise ChildAgentFailedError(f"Sub-agent '{instance_name}' was terminated.\n{detail}")
@@ -452,7 +452,7 @@ def run_child_core(
         # here (run_child_core returns early above when conv is empty), so conv[-1]
         # is safe. Do NOT use extract_instance_output's backwards-search fallback,
         # which can pick an earlier message (without the block) when messages[-1] is
-        # a tool result (BUG_0406 root cause A).
+        # a tool result (root-cause A).
         last_text = extract_text_from_message(conv[-1], add_upload_info=False).strip()
         return _extract_task_block(last_text)
     return _format_result(
