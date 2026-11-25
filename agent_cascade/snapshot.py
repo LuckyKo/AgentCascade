@@ -1,4 +1,4 @@
-"""Durable fleet snapshot — read-only envelope writer (BUG_0323 S2).
+"""Durable fleet snapshot — read-only envelope writer.
 
 Captures every instance in the active stack (active, sleeping and idle alike) as
 ONE versioned JSON envelope: a **manifest of references** to each instance's
@@ -49,7 +49,7 @@ class SnapshotIntegrityError(Exception):
 
 
 class ActiveStackDeletionError(Exception):
-    """Refusal to delete the currently-active stack (BUG_0323 m4).
+    """Refusal to delete the currently-active stack.
 
     Raised by :func:`delete_stack` when ``stack_id`` equals
     ``StackRegistry.active_stack_id`` — deleting the live stack would pull it out
@@ -762,7 +762,7 @@ def capture_fleet_snapshot(
             narrow: they save only the loaded set — the active leaf, or the root when the
             fleet is idle — i.e. the agents whose KV the engine actually retains. Sweeping
             the idle/blocked fleet there wrote stale sessions (400/409) and multi-GB files
-            on every turn end (BUG_0390).
+            on every turn end.
     """
     if not settings.ENABLE_STACK_SWAP:
         logger.debug('[FLEET_SNAPSHOT] requested but ENABLE_STACK_SWAP is off — no-op')
@@ -809,8 +809,8 @@ def capture_fleet_snapshot(
     # The engine retains the KV of only the loaded agent(s). For the explicit path
     # (only_streaming=False) this is the active leaf (or the root when the fleet is
     # idle), computed from the frozen active_stack — NOT resolve_held_endpoint, which
-    # resolves for blocked callers and idle siblings and so swept stale saves fleet-wide
-    # (BUG_0390). Fed as _is_streaming's just_finished so the capable guard is preserved.
+    # resolves for blocked callers and idle siblings and so swept stale saves fleet-wide.
+    # Fed as _is_streaming's just_finished so the capable guard is preserved.
     root_name = _root_instance_name(instances)
     loaded = _loaded_kv_names(active_stack, instances, root_name)
     log_refs: Dict[str, Dict[str, Any]] = {}
@@ -1859,7 +1859,7 @@ def park_active_stack(
 
 
 def normalize_boot_restore_states(pool) -> None:
-    """BUG_0359: a boot-restore has NO live run threads (unlike a runtime swap), so any
+    """A boot-restore has NO live run threads (unlike a runtime swap), so any
     restored instance left in a live-run state (RUNNING/SLEEPING/COMPLETING) is STALE —
     the engine's IDLE->RUNNING entry guard would reject the first run and strand queued
     messages (the UI shows the root "idle" while its internal state is RUNNING).
@@ -2264,7 +2264,7 @@ def delete_stack(pool, stack_id: str, *, registry: Optional[StackRegistry] = Non
         raise ActiveStackDeletionError(
             f"cannot delete active stack {stack_id!r}; park or swap to another stack first")
     entries = reg._snapshots.get(stack_id, [])
-    # Stale-registry fallback (BUG_0368): if the target stack is missing from the
+    # Stale-registry fallback: if the target stack is missing from the
     # in-memory registry but the registry was previously loaded, the in-memory
     # view may be stale (e.g. a snapshot was written after the last disk glob).
     # Clear the loaded flag and re-glob so the delete can find the entry.
@@ -2289,7 +2289,7 @@ def delete_snapshot(pool, stack_id: str, snapshot_id: str, *, registry=None) -> 
     """
     reg = ensure_registry_loaded(pool) if registry is None else registry
     entries = reg._snapshots.get(stack_id)
-    # Stale-registry fallback (BUG_0368): same as delete_stack — if the target
+    # Stale-registry fallback: same as delete_stack — if the target
     # stack is missing from the in-memory registry but was previously loaded,
     # force a fresh disk re-glob before raising.
     if not entries and registry is None and getattr(pool, '_swap_registry_loaded', False):
