@@ -602,6 +602,16 @@ class ToolExecMixin:
                 agent_type=agent_type,
             )
 
+            # Independent class-scoped security floor — the use-time counterpart of the
+            # offered-schema gate in helpers._get_active_functions_from_template. Denies the
+            # Admin read-only tools at call time even when the mutable _generate_cfg_override
+            # carrier was rebuilt/nulled without the floor. Falls back to instance.agent_class
+            # when the template lacks agent_type, matching the helpers gate. Class-scoped to 'admin'.
+            floor_class = (agent_type or (getattr(instance, 'agent_class', '') or ''))
+            if isinstance(floor_class, str) and floor_class.lower() == 'admin':
+                from agent_cascade.constants import ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS
+                disabled_tools |= ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS
+
             function_map = getattr(template, 'function_map', {})
         return template, disabled_tools, function_map
 
