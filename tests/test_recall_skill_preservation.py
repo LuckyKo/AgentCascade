@@ -11,6 +11,7 @@ Verifies the fix in ExecutionEngine._create_and_run_agent:
 All tests are self-contained — no LLM or API server required.
 """
 
+import pytest
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -454,6 +455,7 @@ class TestSkillsBlockInternalHeadings:
     variants so a malformed or user-edited '## Active Skills' heading can't
     bypass it and cause duplicate injection."""
 
+    @pytest.mark.skill_cache_enable_gate
     def test_inject_guard_tolerates_heading_variants(self):
         """BUG_0009 refinement: the idempotency guard must detect heading variants
         (case, whitespace, trailing text) so they can't bypass it and cause

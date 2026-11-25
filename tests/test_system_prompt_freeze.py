@@ -13,6 +13,7 @@ T3, T7, T13 are regression pins that pass pre-fix.
 """
 
 import logging
+import pytest
 import time
 import threading
 from unittest.mock import MagicMock, patch
@@ -594,6 +595,7 @@ class TestResetUnfreezes:
 
 class TestSelfAugInjectionOnFrozenInstance:
 
+    @pytest.mark.skill_cache_enable_gate
     def test_self_aug_injection_noop_on_frozen(self):
         """T13 (REGRESSION PIN): _inject_self_augmentation_skill on a frozen
         instance with the '## Active Skills' heading present is a no-op.

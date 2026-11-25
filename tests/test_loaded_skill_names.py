@@ -17,6 +17,7 @@ stubbed pool. Stubs expose only the attributes each code path touches (same tech
 as ``test_candidate_eval_gate.py``).
 """
 
+import pytest
 import time
 from types import SimpleNamespace
 
@@ -401,6 +402,7 @@ class TestRestoreDedupRegression:
         assert 'Already loaded (skipped): skill-x' in result
         assert 'Successfully loaded' not in result
 
+    @pytest.mark.skill_cache_enable_gate
     def test_t3_root_restore_seeds_conversation_skills(self):
         """ROOT RESTORE. ``_inject_self_augmentation_skill`` on a restored instance (system has
         '## Active Skills', conversation has runtime skill X, field=None) must seed the field to
