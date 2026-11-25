@@ -242,12 +242,15 @@ class _StderrTee:
         self._file = log_handle
 
     def write(self, data):
-        n = self._original.write(data)   # never drop the real stream
+        # Capture FIRST: a console encode failure (e.g. a UnicodeEncodeError rendering a
+        # traceback) must not skip the forensic line this tee exists to capture. A
+        # capture-write failure is swallowed so it can never break the caller.
         try:
             self._file.write(data)
             self._file.flush()           # flush per write so a hard kill loses nothing
         except Exception:
-            pass                         # capture must never break the caller (disk full, ...)
+            pass
+        n = self._original.write(data)   # then the real stream; its exception still propagates
         return n
 
     def flush(self):
