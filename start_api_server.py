@@ -100,7 +100,7 @@ llm_cfg = {
     'memory_hint_skill_autoload_threshold': 3,
     'skill_always_protected': format_skill_always_protected(SKILL_ALWAYS_PROTECTED_DEFAULT),
 }
-# NOTE (Fix 4): the Tier-4 visibility log for this cfg is emitted in __main__ AFTER
+# NOTE: the Tier-4 visibility log for this cfg is emitted in __main__ AFTER
 # init_logging() — logging a bare logger at module-import time would be dropped because
 # no handlers are attached yet. See the `logger.info(...Tier-4 fallback...)` call below.
 
@@ -225,7 +225,7 @@ def _install_fatal_excepthook():
 
 
 class _StderrTee:
-    """Write-through stderr wrapper for in-process BUG_0353 forensic capture.
+    """Write-through stderr wrapper for in-process forensic crash capture.
 
     Forwards every write to BOTH the original stderr stream AND a line-buffered
     log handle, so an unhandled crash on a launch path that does NOT redirect
@@ -236,6 +236,8 @@ class _StderrTee:
     """
 
     def __init__(self, original, log_handle):
+        # Assign both before any delegation: __getattr__ resolves missing attrs via
+        # self._original, so an unset one would recurse rather than raise AttributeError.
         self._original = original
         self._file = log_handle
 
@@ -266,7 +268,7 @@ class _StderrTee:
 
 
 def _install_stderr_tee():
-    """Tee sys.stderr to ``logs/server_stderr.log`` (BUG_0353 forensic gap).
+    """Tee sys.stderr to ``logs/server_stderr.log`` to close a forensic capture gap.
 
     start.bat already redirects fd 2 to that file at the OS level, but every OTHER
     launch path sends stderr to a console that is lost on a hard crash. This tees
@@ -347,7 +349,7 @@ if __name__ == '__main__':
     # normal boot path (only fires on an unhandled exception).
     _install_fatal_excepthook()
 
-    # BUG_0353: tee stderr to logs/server_stderr.log so a crash launched outside
+    # Tee stderr to logs/server_stderr.log so a crash launched outside
     # start.bat (direct python/debugger/IDE) is diagnosable. Independent of the
     # excepthook above; no-op when fd 2 is already redirected there (start.bat).
     _install_stderr_tee()
@@ -357,13 +359,11 @@ if __name__ == '__main__':
     from agent_cascade.splash import print_startup_banner
     print_startup_banner(mode='API Server', port=args.port, host='127.0.0.1')
 
-    # Fix 4: make the hardcoded Tier-4 global default visible at startup. Emitted here
+    # Make the hardcoded Tier-4 global default visible at startup. Emitted here
     # (after init_logging) so it actually reaches the configured handlers — logging a
     # bare module-level logger at import time would be dropped (no handlers yet).
     logger.info(f"[APIRouter] Global default endpoint: '{llm_cfg['model']}' @ {llm_cfg['model_server']} "
                 f"(Tier-4 fallback)")
-
-    import sys
 
     # ── Parse remaining args for --auto_security (instance-id already parsed above) ────
     from agent_cascade.shared_init import parse_cli_args as _parse_base
