@@ -866,8 +866,56 @@ class ConfigPersistMixin:
                     # Content modification triggers config update, log at info level for visibility
                     logger.info('[REFRESH] Template content modified, triggering config update')
                 self.notify_config_changed()
+                # Sync the reloaded soul body into conv[0] of every EXISTING instance so
+                # the "refresh souls" action takes effect on live sessions, not only on
+                # freshly spawned ones. Called ONLY in the change branch so the config
+                # bump above always accompanies a conv[0] rewrite: the next turn is a
+                # guaranteed cache-miss rebuild that regenerates the cached message lists
+                # from the corrected conv[0], and _refresh_system_prompt re-injects the
+                # volatile sections on top of the new soul body. On a no-change refresh
+                # nothing is rewritten, so live instances keep their already-correct prompt.
+                self._apply_soul_refresh_to_existing_instances()
             else:
                 logger.debug('[REFRESH] No changes detected in agent templates, skipping notification')
+
+    def _apply_soul_refresh_to_existing_instances(self) -> None:
+        """Rewrite the soul body (template.system_message) in the conv[0] of every
+        EXISTING instance.
+
+        Called only from the change branch of refresh_agents(), immediately after
+        notify_config_changed(). Writing the raw soul body into conv[0] overwrites the
+        VOLATILE sections (identity, AVAILABLE AGENTS, Session Metadata, trust boundary)
+        that _refresh_system_prompt previously injected on top of the old body. That is
+        safe because the preceding config bump forces a cache-miss rebuild on the next
+        turn: the rebuild regenerates _cached_messages and _cached_llm_messages from the
+        corrected conv[0] (so the cached message lists self-heal, including any that were
+        rebuilt as separate objects), and _refresh_system_prompt re-injects the volatile
+        sections on top of the new soul body. The one-time KV-cache prefix invalidation
+        (one re-prefill per instance) is the accepted cost of the action.
+        """
+        for inst_name, instance in list(self.instances.items()):
+            agent_class = instance.agent_class
+            template = self.templates.get(agent_class)
+            if template is None:
+                # Agent removed from disk; keep the old soul body (normal lifecycle cleans up).
+                continue
+            new_soul = getattr(template, 'system_message', '') or ''
+            if not new_soul:
+                continue
+            with instance._compression_lock:
+                if not instance.conversation:
+                    continue
+                m0 = instance.conversation[0]
+                if isinstance(m0, dict):
+                    m0['content'] = new_soul
+                else:
+                    m0.content = new_soul
+                # Unfreeze so _refresh_system_prompt re-injects the volatile sections on
+                # the next turn's forced rebuild (the volatile sections were just wiped).
+                instance._system_prompt_frozen = False
+            logger.debug(
+                f"[SOUL_REFRESH] Updated soul body for {inst_name} ({agent_class})"
+            )
 
     def notify_config_changed(self):
         """Signal that global configuration has changed (workspace dir, templates, etc).
