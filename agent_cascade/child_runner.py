@@ -9,6 +9,7 @@ import re
 import time
 
 from agent_cascade.compression.helpers import extract_instance_output
+from agent_cascade.utils.utils import extract_text_from_message
 from agent_cascade.log import logger
 from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
@@ -445,9 +446,15 @@ def run_child_core(
     total_cost = max(0.0, _after_cost - baseline_cost)
     elapsed_s = time.monotonic() - _child_start
     if extract_task:
-        # AFK Admin path: return just the [TASK]…[END] block (or the whole message if the
-        # block is absent) so the dispatch can post it as a normal call_agent task.
-        return _extract_task_block(result)
+        # AFK Admin path: parse ONLY the last message (conv[-1]) — the Admin's final
+        # message is the block-bearing message (the prompt contract requires the
+        # [TASK]…[END] block to be the last element). conv is guaranteed non-empty
+        # here (run_child_core returns early above when conv is empty), so conv[-1]
+        # is safe. Do NOT use extract_instance_output's backwards-search fallback,
+        # which can pick an earlier message (without the block) when messages[-1] is
+        # a tool result (BUG_0406 root cause A).
+        last_text = extract_text_from_message(conv[-1], add_upload_info=False).strip()
+        return _extract_task_block(last_text)
     return _format_result(
         instance_name=instance_name,
         result=result,

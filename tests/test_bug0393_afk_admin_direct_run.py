@@ -309,3 +309,33 @@ def test_extract_task_block_content_mentions_marker():
     assert out == 'Follow the [TASK]...'
     # a no-block message falls back to the whole message (the safety net)
     assert _extract_task_block('no markers here') == 'no markers here'
+
+
+def test_run_child_core_extract_task_parses_last_message_only_bug0406():
+    """BUG_0406 fix: run_child_core(extract_task=True) parses ONLY conv[-1] (the
+    block-bearing final message), NOT extract_instance_output's backwards-search
+    result. Drive run_child_core END-TO-END with a mocked engine so the changed
+    branch is actually exercised — the prior inline test re-implemented the branch
+    with direct helper calls and would have stayed green against the reverted code."""
+    from unittest.mock import MagicMock, patch
+    from agent_cascade import child_runner
+
+    conv = [
+        {'role': 'assistant', 'content': 'ladder-walk analysis, no task block here'},
+        {'role': 'assistant', 'content': 'Net: task done\n\n[TASK] Complete BUG_0404 Phase 2 [END]'},
+    ]
+    engine = MagicMock()
+    engine._create_and_run_agent.return_value = (MagicMock(), conv)
+    pool = MagicMock()
+
+    with patch.object(child_runner, '_check_status', return_value=(False, False)), \
+         patch.object(child_runner, '_sum_subtree_tokens_and_cost', return_value=(0, 0.0)):
+        result = child_runner.run_child_core(
+            engine=engine, pool=pool, agent_class='admin', instance_name='AFK_Admin',
+            args={}, caller_name='Maine', child_depth=1, extract_task=True)
+    # the block is extracted from the LAST message (conv[-1]); the earlier analysis
+    # message is ignored (no backwards search through the history). NOTE: this test
+    # guards WHICH message is parsed (index-sensitivity — a conv[0] mutation fails it),
+    # NOT old-vs-new extraction: on this happy-path conv the old fast-path also returns
+    # conv[-1], so it cannot discriminate the backwards-search removal (user-owned design).
+    assert result == 'Complete BUG_0404 Phase 2'
