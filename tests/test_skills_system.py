@@ -1714,11 +1714,38 @@ class TestScanSkillsInactiveMatch:
         assert 'active-zebra' in names
         assert 'inactive-zebra' not in names
 
-    def test_advisor_prompt_excludes_inactive(self):
+    def test_advisor_prompt_excludes_operator_disabled(self):
+        """BUG_0408 (operator-intent guard): an operator/manual-disabled (REASON_MANUAL)
+        inactive skill stays hidden from the advisor even though the candidate surface is
+        widened. The fixture disabled inactive-zebra via disable_skill() -> _apply_status_flip
+        -> inactive_reason=REASON_MANUAL, i.e. a human 'turn off' the advisor must honor."""
         from agent_cascade.skills.advisor import build_skill_advisor_prompt
         prompt = build_skill_advisor_prompt(self.m, 'zebra quantum', '', 'coder', 'test')
         assert 'active-zebra' in prompt
-        assert 'inactive-zebra' not in prompt
+        assert 'inactive-zebra' not in prompt  # operator-disabled: never auto-revived
+
+    def test_advisor_prompt_includes_cache_evicted(self):
+        """BUG_0408 (the actual bug): a servable skill that was CACHE-EVICTED
+        (inactive_reason=REASON_CACHE, BUG_0404) — not turned off by an operator — must be
+        offered to the advisor. Pre-fix the advisor was registry-only and could not see it.
+
+        Re-stamps the fixture's inactive-zebra from REASON_MANUAL to REASON_CACHE; it stays
+        in _disabled_names and servable on disk (so get_all_metadata(False) re-surfaces it),
+        which is exactly the cache_evict_tick commit state."""
+        from agent_cascade.skills.advisor import build_skill_advisor_prompt
+        from agent_cascade.skills.manager import REASON_CACHE
+        m = self.m
+        with m._metrics_lock:
+            for k, v in list(m._metrics.items()):
+                if isinstance(v, dict) and str(k).lower() == 'inactive-zebra':
+                    v['inactive_reason'] = REASON_CACHE
+        # Sanity: it really is inactive/registry-absent but servable (else the test is vacuous).
+        assert 'inactive-zebra' not in m.get_skill_names()
+        assert 'inactive-zebra' in m.get_advisor_candidate_names()
+        prompt = build_skill_advisor_prompt(m, 'zebra quantum', '', 'coder', 'test')
+        assert 'active-zebra' in prompt
+        assert 'inactive-zebra' in prompt
+
 
     def test_settings_disabled_marker_agrees_with_filter(self):
         """A skill disabled via _disabled_names WITHOUT a metrics status=inactive entry

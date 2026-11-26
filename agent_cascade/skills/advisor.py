@@ -116,13 +116,20 @@ def build_skill_advisor_prompt(
     except Exception as e:  # noqa: BLE001 — never block the advisor over a discovery hiccup
         logger.warning('[SKILL-ADVISOR] _ensure_discovered failed (using cached list): %s', e)
 
-    # Build (sort_key, name, line) tuples; sort by average rating desc, unrated last, name asc tiebreak.
-    # Registry-only (active) skills: the advisor must not suggest disabled/inactive skills.
+    # BUG_0408: widen to the cache-revivable candidate surface — active + cache-evicted
+    # (REASON_CACHE) inactive skills that are still servable on disk — instead of the
+    # active-only registry. get_advisor_candidate_names() is the single source of truth,
+    # shared with the validation gate in parse_advisor_output, and already excludes
+    # env-disabled, operator/manual-disabled, and CLASS_BAD skills. Picks served from this
+    # surface go through load_full_instructions' soft-eviction fallback (serve-only).
+    candidate_keys = {str(n).lower() for n in skill_manager.get_advisor_candidate_names()}
     entries = []
-    for meta in skill_manager.get_all_metadata(include_active_only=True):
+    for meta in skill_manager.get_all_metadata(include_active_only=False):
         name = (meta.get('name') or '').strip()
         if not name or name.lower() == _SELF_AUGMENTATION:
             continue
+        if name.lower() not in candidate_keys:
+            continue  # env/operator-disabled or known-bad: keep off the advisor surface
         description = (meta.get('description') or '').strip().replace('\n', ' ')
         rating = skill_manager.get_rating_average(name)
         if rating is None:
@@ -145,10 +152,19 @@ def build_skill_advisor_prompt(
         # The G+C3 scorer truncates to its top-10 by default, which would make any
         # fixed-count guard unsatisfiable. Ask for an uncapped ranking and let the
         # advisor decide how many candidates to show based on match focus.
-        matches = skill_manager.match_skills(query_text, cap=None)  # [(name, score)] sorted desc; score > 0 only
+        # include_inactive=True so the scorer also ranks cache-revivable inactive skills; the
+        # result is then filtered to candidate_keys below so the focus-ratio numerator
+        # (matched_names) is exactly the vetted surface the denominator total=len(entries)
+        # counts. Without include_inactive it would see only active skills; without the
+        # candidate_keys filter it would also return env/operator/known-bad skills that aren't
+        # on the surface — either way the ratio would be skewed and could drop the
+        # cache-revivable surface this change exists to expose (BUG_0408).
+        matches = skill_manager.match_skills(query_text, include_inactive=True, cap=None)  # [(name, score)] sorted desc; score > 0 only
         # self-augmentation is always injected by the engine — it must never occupy a candidate slot.
-        matched_names = [n for n, _ in matches if n.lower() != _SELF_AUGMENTATION]
-        total = len(entries)  # registered non-self-aug skills (disabled already excluded upstream)
+        # Restrict to the candidate surface so numerator and denominator rank the same set.
+        matched_names = [n for n, _ in matches
+                         if n.lower() != _SELF_AUGMENTATION and str(n).lower() in candidate_keys]
+        total = len(entries)  # candidate-surface skills (active + cache-revivable inactive)
         if total > SKILL_ADVISOR_MAX_CANDIDATES and matched_names and len(matched_names) < total * _PREFILTER_FOCUS_THRESHOLD:
             # Focused match: the scorer found a relevant subset — use it.
             shown_set = set(matched_names[:SKILL_ADVISOR_MAX_CANDIDATES])
@@ -226,14 +242,17 @@ def parse_advisor_output(
     verdict = 'deny' if m.group(1).upper() == 'DENY' else 'approve'
     reason = (m.group(2) or '').strip()
 
-    # ── [SKILLS] — validate names against the registry, skip unknowns ───────
+    # ── [SKILLS] — validate names against the advisor surface, skip unknowns ─────
     recommended: List[str] = []
     skills_match = _RE_SKILLS.search(output_text)
     if skills_match is not None:
         raw = skills_match.group(1).strip()
         # "none" (case-insensitive) or empty → no recommendations.
         if raw and raw.lower() != 'none':
-            known_names = set(skill_manager.get_skill_names()) if skill_manager else set()
+            # Same widened surface the prompt was built from (BUG_0408), so a cache-evicted
+            # skill the advisor legitimately picked is accepted here; env/operator-disabled
+            # and known-bad names (excluded from the surface) are still rejected.
+            known_names = set(skill_manager.get_advisor_candidate_names()) if skill_manager else set()
             for part in re.split(r'[,;]', raw):
                 name = part.strip().strip('`"\'')
                 if not name or name.lower() == _SELF_AUGMENTATION:

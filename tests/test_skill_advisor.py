@@ -75,6 +75,11 @@ class MockSkillManager:
     def get_skill_names(self):
         return list(self._names)
 
+    def get_advisor_candidate_names(self):
+        # BUG_0408: the advisor's cache-revivable surface. This mock has no disabled
+        # skills, so the surface is the full name set.
+        return set(self._names)
+
     def get_all_metadata(self, include_active_only=False):
         # Mock has no disabled skills, so the flag is a no-op; accepted to match the real signature.
         return [{'name': n, 'description': f"desc for {n}"} for n in self._names]
@@ -720,6 +725,106 @@ class TestRegistryValidation:
 
         from agent_cascade.settings import SKILL_ADVISOR_MAX_TURNS
         assert m.call_args.kwargs.get('max_turns') == SKILL_ADVISOR_MAX_TURNS
+
+
+# ===========================================================================
+# 3b. Advisor candidate surface — cache-revivable, not registry-only (BUG_0408)
+# ===========================================================================
+
+
+class TestAdvisorCandidateSurface:
+    """Real-SkillManager proof that the advisor sees cache-evicted (REASON_CACHE) skills
+    but still honors operator-disabled (REASON_MANUAL) ones. Corpus is 6 skills (well
+    under SKILL_ADVISOR_MAX_CANDIDATES=20) so the focus pre-filter can never truncate the
+    widened surface — any exclusion observed here is the surface predicate, not the cap."""
+
+    @staticmethod
+    def _write_skill(root, name):
+        d = root / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / 'SKILL.md').write_text(
+            f'---\nname: {name}\ndescription: {name} fixture skill\n'
+            'version: "1.0.0"\n---\n# Body\n', encoding='utf-8')
+
+    @staticmethod
+    def _cache_evict(m, name):
+        """Reproduce the cache_evict_tick commit state: disabled + inactive + REASON_CACHE,
+        then refresh so discover() drops it from the registry while it stays servable."""
+        from agent_cascade.skills.manager import REASON_CACHE
+        with m._write_lock:
+            m._disabled_names.add(name.lower())
+        with m._metrics_lock:
+            entry = m._metrics.setdefault(name, {})
+            entry['status'] = 'inactive'
+            entry['inactive_reason'] = REASON_CACHE
+        m.invalidate_cache()
+        m._cache_ttl = 0.0
+        m._ensure_discovered()
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        from agent_cascade.skills.manager import SkillManager
+        root = tmp_path / 'skills'
+        active = ['alpha-skill', 'beta-skill', 'gamma-skill']
+        cache_evicted = ['cache-evicted-one', 'cache-evicted-two']
+        for name in active + cache_evicted + ['operator-disabled']:
+            self._write_skill(root, name)
+        m = SkillManager()
+        m.discover([root])
+        assert len(m.get_skill_names()) == 6
+        for name in cache_evicted:
+            self._cache_evict(m, name)
+        ok, _ = m.disable_skill('operator-disabled')  # -> REASON_MANUAL
+        assert ok
+        m._cache_ttl = 0.0
+        m.discover([root])  # drop the operator-disabled skill from the registry too
+        return m
+
+    def test_cache_evicted_is_on_surface_operator_disabled_is_not(self, manager):
+        candidates = {str(n).lower() for n in manager.get_advisor_candidate_names()}
+        # Active skills stay on the surface.
+        for name in ('alpha-skill', 'beta-skill', 'gamma-skill'):
+            assert name in candidates
+        # The whole point of BUG_0408: cache-evicted skills are revivable → on the surface.
+        for name in ('cache-evicted-one', 'cache-evicted-two'):
+            assert name in candidates
+        # Operator-disabled (REASON_MANUAL) honors the human turn-off → NOT on the surface.
+        assert 'operator-disabled' not in candidates
+        # Serve-only: the active registry did NOT grow.
+        assert len(manager.get_skill_names()) == 3
+
+    def test_advisor_prompt_offers_cache_evicted_but_not_operator_disabled(self, manager):
+        prompt = build_skill_advisor_prompt(manager, 'task', '', 'coder', 'Maine')
+        assert 'cache-evicted-one' in prompt
+        assert 'cache-evicted-two' in prompt
+        assert 'alpha-skill' in prompt
+        assert 'operator-disabled' not in prompt
+
+    def test_pick_of_cache_evicted_validates_operator_disabled_rejected(self, manager):
+        out = ('[VERDICT] APPROVE — cache-evicted skill is relevant\n'
+               '[SKILLS] cache-evicted-one, operator-disabled, not-a-skill\n')
+        sm = manager
+        r = parse_advisor_output(out, skill_manager=sm)
+        assert r.verdict == 'approve'
+        # cache-evicted pick accepted (it is on the candidate surface) ...
+        assert 'cache-evicted-one' in r.recommended_skills
+        # ... but operator-disabled (and unknown) names are dropped.
+        assert 'operator-disabled' not in r.recommended_skills
+        assert 'not-a-skill' not in r.recommended_skills
+
+    def test_class_bad_cache_evicted_skill_is_dropped_from_surface(self, manager):
+        """The CLASS_BAD hard veto applies to cache-revivable inactive candidates
+        (mirrors prefetch_for_task): a known-bad evicted skill must NOT be surfaced,
+        while its unproven cache-evicted sibling stays — proving the drop is the
+        classifier veto, not the eviction itself."""
+        with manager._metrics_lock:
+            # avg=1.0 over n=20 -> qhat ~ (20*1.0 + 5*5)/(20+5) = 1.8 <= 4.5 and n>=5
+            # -> skill_classify returns CLASS_BAD (scoring.py:74).
+            manager._metrics['cache-evicted-one']['ratings'] = {'count': 20, 'sum': 20}
+        candidates = {str(n).lower() for n in manager.get_advisor_candidate_names()}
+        assert 'cache-evicted-one' not in candidates  # vetoed as known-bad
+        assert 'cache-evicted-two' in candidates      # sibling cache-evicted (unproven) survives
+        assert 'alpha-skill' in candidates            # active set unaffected by the veto
 
 
 # ===========================================================================

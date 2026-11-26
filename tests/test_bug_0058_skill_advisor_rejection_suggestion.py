@@ -34,6 +34,10 @@ class FakeSkillManager:
     def get_skill_names(self):
         return list(self._names)
 
+    def get_advisor_candidate_names(self):
+        # BUG_0408: advisor cache-revivable surface; this fake has no disabled skills.
+        return set(self._names)
+
     def get_all_metadata(self, include_active_only=False):
         return [{'name': n, 'description': f"desc for {n}"} for n in self._names]
 

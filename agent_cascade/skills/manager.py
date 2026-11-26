@@ -1844,6 +1844,72 @@ class SkillManager:
         with self._write_lock:
             return list(self._skills_registry.keys())
 
+    def get_advisor_candidate_names(self) -> set:
+        """The skill advisor's *choice* surface: active skills + cache-revivable
+        inactive skills that are servable on disk (BUG_0408).
+
+        The advisor used to be offered the active registry only, so a skill that the
+        skill cache had evicted (``inactive_reason == REASON_CACHE``) was invisible to it
+        even though ``load_full_instructions`` could still *serve* it on demand. This
+        widens the advisor's view to every skill it may legitimately pick, mirroring the
+        exclusions :meth:`prefetch_for_task` applies to cache candidates so the advisor
+        never recommends a skill the operator deliberately withheld or one the classifier
+        has already flagged as known-bad.
+
+        Exclusions (same predicates as prefetch_for_task, manager.py:2350-2356):
+          - env-disabled (``SKILLS_DISABLED``) — never recommend;
+          - operator/manual-disabled (metrics ``inactive_reason == REASON_MANUAL``) —
+            a human turn-off is honored, the advisor must not resurrect it;
+          - ``CLASS_BAD`` *inactive* candidates — known-bad skills are never surfaced.
+
+        ACTIVE registry skills are always included: the active set is the served set, and
+        hiding an (already-served) BAD-class active skill from the advisor would change
+        served semantics for no benefit — removing it is the rebalancer's job, not the
+        advisor's. The BAD veto therefore applies to inactive revivable candidates only,
+        exactly matching prefetch_for_task (which only vetoes skills it could *admit*).
+
+        Serve-only / read-only: this never mutates ``_skills_registry``,
+        ``_disabled_names`` or metrics, so it cannot grow the active set. It is the single
+        source of truth shared by both advisor gates (the candidate list built in
+        ``advisor.py`` and the pick-validation gate) so the two cannot drift apart.
+        """
+        env_disabled = {str(n).lower() for n in SKILLS_DISABLED}
+        score_kw = self._scoring_kwargs()
+        now = time.time()
+        # Snapshot under the locks, then operate on the snapshots (no nested locks, and no
+        # lock held across get_all_metadata/_cls_key — same discipline as prefetch_for_task).
+        with self._write_lock:
+            disabled = {str(n).lower() for n in self._disabled_names}
+        with self._metrics_lock:
+            global_turns = self._global_activity_turns
+            snap = {str(k).lower(): v for k, v in self._metrics.items() if isinstance(v, dict)}
+
+        def _is_bad(entry: dict) -> bool:
+            r_ = entry.get('ratings') or {}
+            n = r_.get('count', 0)
+            avg = (r_['sum'] / n) if n else None
+            A = self._activity_age(entry, global_turns, now)
+            return skill_classify(n, avg, A, **score_kw['classify']) == CLASS_BAD
+
+        names = set()
+        for meta in self.get_all_metadata(include_active_only=False):
+            name = (meta.get('name') or '').strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in env_disabled:
+                continue
+            entry = snap.get(key, {})
+            # Only vet the INACTIVE (cache-revivable) candidates; active skills are served
+            # as-is. key not in disabled => active registry skill => always on the surface.
+            if key in disabled:
+                if entry.get('inactive_reason') == REASON_MANUAL:  # operator-disabled: never
+                    continue
+                if _is_bad(entry):  # hard veto: never speculate on known-bad
+                    continue
+            names.add(name)
+        return names
+
     def match_skills(self, query: str, include_inactive: bool = False,
                      cap: Optional[int] = None) -> List[Tuple[str, float]]:
         """Public interface for matching skills against a query.
@@ -1957,9 +2023,10 @@ class SkillManager:
         ``discover()`` drops them, so they must be re-surfaced here). When True only the active
         registry skills are returned.
 
-        NOTE: existing callers (advisor.py, propose_skill.py, _rebuild_index) rely on the
-        pre-change behavior of "registry-only". They now pass ``include_active_only=True`` to
-        keep that exact behavior — see those call sites.
+        NOTE: callers that want the historical "registry-only" view (e.g. propose_skill.py's
+        duplicate-name scan) pass ``include_active_only=True``. The skill advisor and
+        _rebuild_index use the default (False) so they see cache-revivable inactive skills —
+        see ``get_advisor_candidate_names`` for the advisor's vetted cache-revivable surface.
         """
         with self._write_lock:
             result = []
