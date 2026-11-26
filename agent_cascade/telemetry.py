@@ -40,6 +40,36 @@ _telemetry_lock = threading.RLock()
 # Truncation limit for error messages in telemetry events to avoid bloating logs
 MAX_ERROR_MESSAGE_LENGTH = 200
 
+#: Closed taxonomy of tool-call failure classes (BUG_0424). Attached to failed
+#: ``tool_call`` events so downstream consumers can route/self-correct by cause.
+TOOL_FAILURE_CLASSES = ('timeout', 'bad-args', 'not-found', 'permission', 'transient-5xx', 'other')
+
+
+def _classify_tool_failure(error: str) -> str:
+    """Map a tool-call error string to a closed ``failure_class`` (BUG_0424).
+
+    Keyword heuristics, most-actionable first; default ``'other'``. Pure, no I/O.
+    A caller-supplied ``failure_class`` on ``record_tool_call_end`` wins over this.
+    """
+    e = (error or '').lower()
+    if not e:
+        return 'other'
+    if any(k in e for k in ('500', '502', '503', '504', '5xx', 'internal server error',
+                            'bad gateway', 'service unavailable', 'gateway timeout')):
+        return 'transient-5xx'
+    if any(k in e for k in ('timed out', 'timeout', 'deadline', 'cancelled', 'canceled')):
+        return 'timeout'
+    if any(k in e for k in ('invalid', 'validation', 'schema', 'argument', 'required',
+                            'malformed', 'json', 'type error')):
+        return 'bad-args'
+    if any(k in e for k in ('not found', 'no such file', 'no such', 'does not exist',
+                            'missing', '404')):
+        return 'not-found'
+    if any(k in e for k in ('permission', 'denied', 'forbidden', 'unauthorized',
+                            'access', '401', '403')):
+        return 'permission'
+    return 'other'
+
 # Cache-waste diagnosis thresholds (borrow-audit #7, mirrors pi cache-stats.ts).
 # A detected miss is only counted as waste when the reprocessed prompt exceeds
 # this floor — small deltas are normal prompt variation, not wasted recompute.
@@ -1605,6 +1635,7 @@ class TelemetryCollector:
         result_chars: int = 0,
         truncated: bool = False,
         error: str = '',
+        failure_class: Optional[str] = None,
         is_call_agent: bool = False,
         latency_ms: Optional[float] = None,
     ):
@@ -1636,6 +1667,11 @@ class TelemetryCollector:
             }
             if error:
                 event['error'] = error[:MAX_ERROR_MESSAGE_LENGTH]
+            if not success or error:
+                event['failure_class'] = (
+                    failure_class if failure_class in TOOL_FAILURE_CLASSES
+                    else _classify_tool_failure(error)
+                )
 
             # Update session stats (call_agent excluded from avg tool latency)
             self._session_stats['total_tool_calls'] += 1
