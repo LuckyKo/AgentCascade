@@ -383,6 +383,22 @@ def pytest_configure(config):
         print('\n[conftest] No local LLM server detected — integration tests will be skipped')
 
 
+@pytest.hookimpl
+def pytest_xdist_auto_num_workers(config):
+    """BUG_0418: RAM-proportional xdist worker count for `-n auto`.
+
+    xdist calls this `firstresult` hook ONLY when `-n` is `auto`/`logical`
+    (xdist/plugin.py), so an explicit numeric `-n` skips it entirely and user
+    overrides win for free. Returning None defers to xdist's built-in CPU-count
+    default. Uses `print` (not the terminal writer) because the terminal reporter
+    does not yet exist at this hook stage — see the BUG_0036 note in
+    pytest_sessionstart below. The `[conftest][BUG_0418]` transparency line is
+    printed inside resolve_xdist_n() (it owns the available/nproc data it reports).
+    """
+    from tests.xdist_ram_balance import resolve_xdist_n
+    return resolve_xdist_n()
+
+
 def pytest_sessionstart(session):
     """BUG_0036: install the EBADF-tolerant terminal sink.
 
