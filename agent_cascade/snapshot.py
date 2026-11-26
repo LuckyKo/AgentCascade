@@ -1593,6 +1593,9 @@ def _inject_killed_tool_result(pool, inst, name: str) -> None:
     try:
         with (lock if lock is not None else nullcontext()):
             msgs = list(conversation)
+            # Sentinel for an id-less trailing call's synthetic close. Lazy import avoids
+            # an agents<->snapshot load-time cycle; resolved at call time. See BUG_0415.
+            from agent_cascade.agents.message_sanitize import ORPHAN_TOOL_CALL_ID
 
             # Collect ids/names already answered by a FUNCTION result.
             answered_ids, answered_names = set(), set()
@@ -1612,7 +1615,7 @@ def _inject_killed_tool_result(pool, inst, name: str) -> None:
                 if fc is None:
                     continue
                 call_name = _msg_get(fc, 'name') or _msg_get(m, 'name')
-                call_id = (_msg_get(m, 'extra') or {}).get('function_id') or '1'
+                call_id = (_msg_get(m, 'extra') or {}).get('function_id') or ORPHAN_TOOL_CALL_ID
                 if (call_id and call_id in answered_ids) or (call_name and call_name in answered_names):
                     continue
                 fn_msg = Message(

@@ -16,6 +16,7 @@ import copy
 from typing import Dict, Iterator, List, Literal, Optional, Union
 
 from agent_cascade import Agent
+from agent_cascade.agents.message_sanitize import ORPHAN_TOOL_CALL_ID
 from agent_cascade.llm import BaseChatModel
 from agent_cascade.llm.schema import DEFAULT_SYSTEM_MESSAGE, FUNCTION, Message
 from agent_cascade.memory import Memory
@@ -108,7 +109,7 @@ class FnCallAgent(Agent):
                         fn_msg = Message(role=FUNCTION,
                                          name=tool_name,
                                          content=tool_result,
-                                         extra={'function_id': extra.get('function_id', '1')})
+                                         extra={'function_id': extra.get('function_id') or ORPHAN_TOOL_CALL_ID})
                         messages.append(fn_msg)
                         response.append(fn_msg)
                         yield response

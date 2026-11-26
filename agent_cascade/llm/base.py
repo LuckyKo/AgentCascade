@@ -328,6 +328,12 @@ class BaseChatModel(ABC):
                 continue  # Explicit: skip this item from new_messages
         messages = new_messages
 
+        # BUG_0415: enforce tool-result sequence invariants (drop orphaned results,
+        # collapse duplicates, group results with their owning call) on every send.
+        # Lazy import avoids an llm<->agents load-time cycle; resolved at request time.
+        from agent_cascade.agents.message_sanitize import sanitize_tool_messages
+        messages = sanitize_tool_messages(messages)
+
         if not messages:
             raise ValueError('Messages can not be empty.')
 
@@ -770,6 +776,11 @@ class BaseChatModel(ABC):
 
     @staticmethod
     def _conv_agent_cascade_messages_to_oai(messages: List[Union[Message, Dict]], echo_reasoning_blocks: bool = False):
+        # Lazy import: agent_cascade.agents.__init__ pulls in the whole agent tree (and thus llm);
+        # importing it at module load here would be circular. This runs at request time, well after
+        # package init, so the import is always resolved from sys.modules. See BUG_0415.
+        from agent_cascade.agents.message_sanitize import ORPHAN_TOOL_CALL_ID
+
         new_messages = []
         for msg in messages:
             if msg['role'] == ASSISTANT:
@@ -815,7 +826,7 @@ class BaseChatModel(ABC):
                     fn_args = BaseChatModel._sanitize_fn_args(msg['function_call'].get('arguments', ''))
 
                     new_messages[-1]['tool_calls'].append({
-                        'id': msg.get('extra', {}).get('function_id', '1'),
+                        'id': msg.get('extra', {}).get('function_id', ORPHAN_TOOL_CALL_ID),
                         'type': 'function',
                         'function': {
                             'name': msg['function_call']['name'],
@@ -824,7 +835,7 @@ class BaseChatModel(ABC):
                     })
             elif msg['role'] == FUNCTION:
                 # OpenAI spec: tool messages need 'tool_call_id', not 'id'
-                tool_call_id = msg.get('extra', {}).get('function_id', '1')
+                tool_call_id = msg.get('extra', {}).get('function_id', ORPHAN_TOOL_CALL_ID)
                 content = msg.get('content', '')
                 if isinstance(content, list):
                     # Check if there are any multimodal items (image_url, video_url, input_audio).

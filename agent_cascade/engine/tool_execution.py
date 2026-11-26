@@ -19,6 +19,7 @@ from agent_cascade.agent_instance import AgentInstance
 from agent_cascade.error_reporting import TB_DEDUP, format_crash
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.llm.schema import FUNCTION, Message
+from agent_cascade.agents.message_sanitize import ORPHAN_TOOL_CALL_ID
 from agent_cascade.log import logger
 from agent_cascade.operation_manager import clear_current_instance_name, set_current_instance_name
 from agent_cascade import settings as _ac_settings
@@ -510,7 +511,7 @@ class ToolExecMixin:
                     name=tool_name,
                     content=_wrap_untrusted(tool_name, tool_result),
                     extra={
-                        'function_id': function_id or '1',
+                        'function_id': function_id or ORPHAN_TOOL_CALL_ID,
                         'tool_success': _tool_success,
                     },
                 )
@@ -526,7 +527,7 @@ class ToolExecMixin:
                 if _swap_identity_lost(self.pool, instance, inst_name):
                     logger.info('[STACK_SWAP] %s discarding late real tool result for '
                                 'function_id=%s (parked/swapped; killed close stands)',
-                                inst_name, function_id or '1')
+                                inst_name, function_id or ORPHAN_TOOL_CALL_ID)
                 else:
                     self._append_and_log(instance, fn_msg)
                     response.append(fn_msg)  # Stream tool result to UI (separate list for streaming)
@@ -688,7 +689,7 @@ class ToolExecMixin:
                     name=tool_name,
                     content=fn_content,
                     extra={
-                        'function_id': _orphan_function_id or '1',  # Use same pattern as primary loop
+                        'function_id': _orphan_function_id or ORPHAN_TOOL_CALL_ID,  # Use same pattern as primary loop
                         'tool_success': False,
                     },
                 )
@@ -785,7 +786,7 @@ class ToolExecMixin:
                 role=FUNCTION,
                 name=tool_name,
                 content=_wrap_untrusted(tool_name, fn_content),
-                extra={'function_id': function_id or '1', 'tool_success': False},
+                extra={'function_id': function_id or ORPHAN_TOOL_CALL_ID, 'tool_success': False},
             )
         except Exception as build_err:
             logger.error(f'terminate marker build failed (idx={idx}): {format_crash(build_err)}')
@@ -798,7 +799,7 @@ class ToolExecMixin:
                 role=FUNCTION,
                 name=tool_name,
                 content=fn_content,
-                extra={'function_id': function_id or '1', 'tool_success': False},
+                extra={'function_id': function_id or ORPHAN_TOOL_CALL_ID, 'tool_success': False},
             )
         # Telemetry: one start/end pair per emitted marker (never breaks the run).
         if (tel := self._telemetry()) is not None:
@@ -1165,7 +1166,7 @@ class ToolExecMixin:
             name=tool_name,
             content=tool_result,
             extra={
-                'function_id': function_id or '1',
+                'function_id': function_id or ORPHAN_TOOL_CALL_ID,
                 'tool_success': False,
             },
         )
@@ -1312,7 +1313,7 @@ class ToolExecMixin:
                 name='edit_file',
                 content=_wrap_untrusted('edit_file', result_str),
                 extra={
-                    'function_id': function_id or '1',
+                    'function_id': function_id or ORPHAN_TOOL_CALL_ID,
                     'tool_success': success,
                 },
             )
@@ -1326,7 +1327,7 @@ class ToolExecMixin:
                 name='edit_file',
                 content=_wrap_untrusted('edit_file',
                                         f'Error: edit_file execution failed: {format_crash(build_err)}'),
-                extra={'function_id': function_id or '1', 'tool_success': False},
+                extra={'function_id': function_id or ORPHAN_TOOL_CALL_ID, 'tool_success': False},
             )
         # Telemetry must never break the batch: log-and-swallow like the per-call hooks.
         try:
