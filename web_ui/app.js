@@ -254,6 +254,7 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-compression-force-threshold', prop: 'value', key: 'compression_force_threshold' },
   { id: '#setting-compression-proactive-threshold', prop: 'value', key: 'compression_proactive_threshold' },
   { id: '#setting-compression-context-reserve-tokens', prop: 'value', key: 'compression_context_reserve_tokens' },
+  { id: '#setting-compression-review-max-retries', prop: 'value', key: 'compression_review_max_retries' },
   { id: '#setting-compression-fraction', prop: 'value', key: 'compression_fraction' },
   // Image caption mode (auto/always/off) — stored under the underscore key written by saveSettings()/getGenerateCfg()
   { id: '#setting-image-caption-mode', prop: 'value', key: 'image_caption_mode' },
@@ -6833,6 +6834,8 @@ function getGenerateCfg() {
   if ($('#setting-compression-proactive-threshold')) cfg.compression_proactive_threshold = Math.min(96, Math.max(50, parseFloat($('#setting-compression-proactive-threshold').value) || 88));
   if ($('#setting-compression-context-reserve-tokens')) cfg.compression_context_reserve_tokens = Math.min(10000, Math.max(500, parseInt($('#setting-compression-context-reserve-tokens').value) || 3000));
   if ($('#setting-compression-fraction')) cfg.compression_fraction = Math.min(90, Math.max(10, parseInt($('#setting-compression-fraction').value) || 70));
+  // 0 is a legit value (gate off) — do NOT use `|| 2`; empty input → 0, clamp to handler range 0..5.
+  if ($('#setting-compression-review-max-retries')) { const _crrRaw = parseInt($('#setting-compression-review-max-retries').value, 10); cfg.compression_review_max_retries = Number.isNaN(_crrRaw) ? 0 : Math.min(5, Math.max(0, _crrRaw)); }
 
   if ($('#setting-grep-char-limit')) cfg.grep_char_limit = parseInt($('#setting-grep-char-limit').value) || -1;
   if ($('#setting-grep-spillover')) cfg.grep_spillover = $('#setting-grep-spillover').checked;

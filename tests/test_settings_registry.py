@@ -283,9 +283,10 @@ def test_snapshot_is_json_serializable():
 
 def test_stack_swap_keys_registry_coverage():
     """BUG_0345 S6: ``enable_stack_swap`` / ``stack_restore_on_boot`` are first-class
-    registry keys (``kind='extra'``). Pin the derived counts (pool stays 113; extra-persist
-    is now 5 — the keys were added only to that set), the seed defaults, BROADCAST_KEYS
-    membership, and registered handlers, and confirm ``validate_registry()`` still passes."""
+    registry keys (``kind='extra'``). Pin the derived counts (the pool count is pinned
+    below; extra-persist is now 5 — the keys were added only to that set), the seed
+    defaults, BROADCAST_KEYS membership, and registered handlers, and confirm
+    ``validate_registry()`` still passes."""
     from agent_cascade.config_handlers import CONFIG_HANDLERS
     from agent_cascade.settings_registry import (
         _DEFAULTS,
@@ -293,8 +294,8 @@ def test_stack_swap_keys_registry_coverage():
         _POOL_SETTINGS_KEY_COUNT,
     )
 
-    # Counts are pinned: pool is now 116 (effort_level added by BUG_0380), extra persist is 5.
-    assert _POOL_SETTINGS_KEY_COUNT == 116, 'pool key count must stay 116'
+    # Counts are pinned: pool is now 117 (compression_review_max_retries added by BUG_0419), extra persist is 5.
+    assert _POOL_SETTINGS_KEY_COUNT == 117, 'pool key count must stay 117'
     assert _EXTRA_PERSIST_KEY_COUNT == 5, 'extra-persist key count must be 5'
 
     for key in ('enable_stack_swap', 'stack_restore_on_boot'):

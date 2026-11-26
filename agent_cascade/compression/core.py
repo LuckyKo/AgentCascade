@@ -213,7 +213,9 @@ def _validate_and_reconsolidate(
     making the no-gate path byte-identical.
     """
     # Disabled -> reviewer is never invoked; behavior identical to the pre-gate path.
-    if not COMPRESSION_REVIEWER_ENABLED:
+    # Decision 1 (BUG_0419): 0 review rounds == gate fully off — return early so the
+    # initial review, re-consolidations, ERROR log and LOSS telemetry all stay off.
+    if not COMPRESSION_REVIEWER_ENABLED or COMPRESSION_REVIEW_MAX_RETRIES == 0:
         return initial_summary
 
     try:

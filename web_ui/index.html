@@ -471,6 +471,10 @@
                     <input autocomplete="off" type="number" id="setting-compression-context-reserve-tokens" min="500" max="10000" step="500" value="3000" />
                     </label>
                     <label class="setting-field">
+                    <span title="Extra consolidation attempts after the L2 compaction reviewer flags a LOSS verdict (each round costs a consolidation + a review). 0 = disabled (no re-consolidation; the reviewer gate is off entirely).">L2 Compression Review Rounds</span>
+                    <input autocomplete="off" type="number" id="setting-compression-review-max-retries" min="0" max="5" step="1" value="2" />
+                    </label>
+                    <label class="setting-field">
                     <span title="% of conversation history to discard when compressing">Compression Percentage (%)</span>
                     <input autocomplete="off" type="number" id="setting-compression-fraction" min="10" max="90" step="1" value="70" />
                   </label>

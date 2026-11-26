@@ -1079,6 +1079,34 @@ def _handle_compression_max_attempts(ui_cfg: dict, agent_pool: Optional[Any], ag
         agent_pool.settings.compression_max_attempts = val
 
 
+def apply_compression_review_max_retries(value: int) -> None:
+    """Mirror a compaction-review retry count into both consumer module namespaces (BUG_0419).
+
+    core.py:252 (retry loop bound) and agent_invoker.py:1090 (review-prompt text) read
+    module-level ``from settings import`` copies — NOT ``pool.settings`` — so a live UI save
+    must patch BOTH namespaces to take effect without a restart. The two modules are imported
+    lazily here to avoid an import cycle (config_handlers is loaded early; compression pulls
+    in the execution engine). Used by the handler below and the api_server boot sync.
+    """
+    import agent_cascade.compression.core as _core
+    import agent_cascade.compression.agent_invoker as _invoker
+    _core.COMPRESSION_REVIEW_MAX_RETRIES = value
+    _invoker.COMPRESSION_REVIEW_MAX_RETRIES = value
+
+
+@register_config_handler('compression_review_max_retries')
+def _handle_compression_review_max_retries(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Clamp to 0..5 (0 = reviewer gate fully off) and live-apply to both consumer namespaces.
+
+    Clamp is 0-tolerant — ``max(0, …)`` NOT ``max(1, …)``: 0 is a legitimate value meaning
+    "disable the gate entirely" (locked decision 2).
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(0, min(5, int(ui_cfg['compression_review_max_retries'])))
+        agent_pool.settings.compression_review_max_retries = val
+        apply_compression_review_max_retries(val)
+
+
 @register_config_handler('compression_proactive_threshold')
 def _handle_compression_proactive_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):

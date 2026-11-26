@@ -3169,6 +3169,15 @@ if __name__ == '__main__':
 
     operation_mgr.agent_pool = agent_pool
 
+    # BUG_0419 (strategy A): live-apply the persisted L2 compaction-review retry count into
+    # the two consumer module namespaces (core.py loop bound, agent_invoker.py prompt text).
+    # They hold `from settings import` copies frozen at import time, so a value persisted to
+    # pool_settings.json would otherwise be ignored until the next UI save. getattr-guard keeps
+    # a stale/partial settings payload from crashing boot; default 2 == the settings default.
+    from agent_cascade.config_handlers import apply_compression_review_max_retries
+    apply_compression_review_max_retries(
+        getattr(agent_pool.settings, 'compression_review_max_retries', 2))
+
     # Apply CLI/env overrides via config handlers (before any WebSocket connections exist).
     # Uses handlers directly for validation and consistency with runtime updates.
     from agent_cascade.config_handlers import CONFIG_HANDLERS
