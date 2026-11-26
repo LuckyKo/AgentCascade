@@ -233,8 +233,29 @@ class TestIsIncompleteStateRegression:
 # ── Default pure-resend path (nudge OFF) ────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _pin_soft_continue_nudge_gate(request, monkeypatch):
+    """Honour a per-class NUDGE_ENABLED gate; the compiled settings default is now ON.
+
+    SOFT_CONTINUE_NUDGE_ENABLED now defaults ON, so response_pipeline (which binds it as an
+    import-time module constant) injects an escalating USER nudge on each reasoning-only soft
+    continue. The pure-resend suites below pin NUDGE_ENABLED = False to keep asserting the
+    non-nudge path; TestNudgeOnPath sets it True. Classes without the attribute (the
+    malformed / normal-completion / auto-continue-off guards, whose subject never reaches the
+    nudge branch) are left at the ON default. The symbol is patched in the consumer module
+    (response_pipeline), not settings, because production reads the module-level constant.
+    """
+    gate = getattr(request.cls, 'NUDGE_ENABLED', None)
+    if gate is None:
+        return
+    import agent_cascade.engine.response_pipeline as pipeline_mod
+    monkeypatch.setattr(pipeline_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', gate)
+
+
 class TestPureResendDefault:
     """With SOFT_CONTINUE_NUDGE_ENABLED=False, soft continues append nothing and roll back nothing."""
+
+    NUDGE_ENABLED = False
 
     def _engine(self):
         return _Engine(_FakePool(nudge_enabled=False))
@@ -281,6 +302,8 @@ class TestPureResendDefault:
 
 class TestSoftPathStaysClosedAfterFullRetry:
 
+    NUDGE_ENABLED = False
+
     def _engine(self):
         return _Engine(_FakePool(nudge_enabled=False))
 
@@ -325,6 +348,8 @@ class TestSoftPathStaysClosedAfterFullRetry:
 
 
 class TestNoOverPop:
+
+    NUDGE_ENABLED = False
 
     def test_consecutive_full_retries_pop_exactly_turn_output(self):
         engine = _Engine(_FakePool(nudge_enabled=False))
@@ -422,17 +447,20 @@ class TestOtherMalformedCasesUnchanged:
 class TestNudgeOnPath:
     """With SOFT_CONTINUE_NUDGE_ENABLED=True, soft continues append an escalating USER nudge.
 
-    The production code reads ``SOFT_CONTINUE_NUDGE_ENABLED`` as a module-level constant in
-    ``core.py`` (evaluated at import time), so we monkeypatch that symbol for these tests.
+    Production reads ``SOFT_CONTINUE_NUDGE_ENABLED`` as an import-time module constant in
+    ``response_pipeline.py``; the module-level _pin_soft_continue_nudge_gate fixture patches that
+    symbol here via NUDGE_ENABLED = True below.
     """
 
+    NUDGE_ENABLED = True
+
     @pytest.fixture(autouse=True)
-    def _enable_nudge(self, monkeypatch):
+    def _raise_soft_budget(self, monkeypatch):
         import agent_cascade.engine.response_pipeline as pipeline_mod
 
-        # Enable the nudge flag AND raise N to 3 so the soft→full transition is reachable under
-        # cap=5 (with the default N=2 the cap fires on attempt 3 before any full retry occurs).
-        monkeypatch.setattr(pipeline_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', True)
+        # Raise N to 3 so the soft→full transition is reachable under cap=5 (with the default
+        # N=2 the cap fires on attempt 3 before any full retry occurs). The nudge gate itself is
+        # pinned ON via NUDGE_ENABLED (handled by the module fixture).
         monkeypatch.setattr(pipeline_mod, 'REASONING_ONLY_CONTINUE_ATTEMPTS', 3)
         yield
 

@@ -504,8 +504,9 @@ class AgentInstance:
     _reasoning_only_soft_attempts: int = field(default=0)
     # Rollback accounting: number of soft-continue nudges currently sitting in context that a
     # rollback must pop. Only non-zero when SOFT_CONTINUE_NUDGE_ENABLED is True (a nudge was
-    # actually injected); with the default pure-resend behavior it stays 0 because nothing new is
-    # added to context. Zeroed immediately after any rollback that pops them (N1).
+    # actually injected — the current default); with the flag disabled (AGENT_CASCADE_SOFT_CONTINUE_NUDGE=0)
+    # it stays 0 because the pure-resend path adds nothing to context. Zeroed immediately after
+    # any rollback that pops them (N1).
     _reasoning_only_pending_nudges: int = field(default=0)
 
     # ── Compression-Specific Notification Queue ───────────────────────────────

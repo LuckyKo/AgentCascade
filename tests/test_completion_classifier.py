@@ -374,6 +374,19 @@ class TestLogPrefixOwnership:
 
 class TestCostGuard:
 
+    @pytest.fixture(autouse=True)
+    def _disable_soft_continue_nudge(self, monkeypatch):
+        """Pin SOFT_CONTINUE_NUDGE_ENABLED OFF for this cost-guard suite.
+
+        The compiled default is now ON, so a reasoning-only soft continue tries to inject
+        a USER nudge — but this suite's subject is that a structurally-detected turn costs
+        no classifier HTTP, and its harness doesn't bind the nudge helper. Pin the gate OFF
+        so the reasoning-only branch stays a pure resend, keeping the test independent of
+        the (unrelated) nudge feature.
+        """
+        import agent_cascade.engine.response_pipeline as pipeline_mod
+        monkeypatch.setattr(pipeline_mod, 'SOFT_CONTINUE_NUDGE_ENABLED', False)
+
     @pytest.mark.parametrize('msg_factory', [_empty_output_msg, _reasoning_only_msg],
                              ids=['empty-output', 'reasoning-only'])
     def test_structural_turns_never_reach_the_classifier(self, msg_factory):

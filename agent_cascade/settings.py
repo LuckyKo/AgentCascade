@@ -239,13 +239,13 @@ MAX_AUTO_CONTINUE_ATTEMPTS: int = 5  # Max consecutive auto-continue attempts pe
 # Soft continues share the MAX_AUTO_CONTINUE_ATTEMPTS budget with full retries, so an episode is
 # bounded at exactly min(N, cap) soft + (cap - min(N, cap)) full attempts.
 REASONING_ONLY_CONTINUE_ATTEMPTS: int = int(os.getenv('AGENT_CASCADE_REASONING_ONLY_CONTINUE_ATTEMPTS', 2))
-# Deferred escape hatch for the soft-continue path. When False (default), a reasoning-only soft
-# continue is a PURE RESEND: no new message is appended and nothing is rolled back — the LLM is
-# simply re-called on the same history with the reasoning message still in place. When True, an
-# escalating USER nudge ("stop thinking / produce output") is injected on each soft continue so the
-# model gets an explicit instruction instead of a bare resend. Kept behind a flag so it can be
-# enabled later without re-architecting.
-SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE', '0') == '1'
+# Soft-continue mode for the reasoning-only path. When True (default), each reasoning-only soft
+# continue injects an escalating USER nudge ("stop thinking / produce output") so the model gets an
+# explicit instruction instead of a bare resend. When False, a reasoning-only soft continue is a PURE
+# RESEND: no message is appended and nothing is rolled back — the LLM is simply re-called on the same
+# history with the reasoning message still in place. Set AGENT_CASCADE_SOFT_CONTINUE_NUDGE=0 to get
+# the pure-resend behavior.
+SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE', '1') == '1'
 
 # Trust boundary (OWASP LLM01, indirect prompt injection): when ON, untrusted tool
 # outputs are wrapped in <tag> delimiters and a standing system-prompt line tells the
@@ -1183,14 +1183,15 @@ MEMORY_BANDIT_THETA_MAX: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_TH
 #   to the skill's demote floor; default identical (0.35).
 MEMORY_BANDIT_M_FLOOR: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_M_FLOOR', '0.35'))
 
-# Same-turn, opportunistic hint delivery (BUG_0382). OFF by default; the feature
-# stays off via llm_cfg 'memory_hint_enabled' regardless. When True AND memory_hint
-# enabled, the submit at the Phase-3/4 boundary returns a completion handle and the
-# post-Phase-4 peek attaches an already-computed hint to the SAME turn as a SYSTEM
-# note. If the worker is not ready at the peek, the hint defers to the next turn
-# exactly as today (no block, no regression). NO wait budget: the peek is always
-# non-blocking, so there is no delay knob to tune.
-MEMORY_HINT_INLINE: bool = os.getenv('AGENT_CASCADE_MEMORY_HINT_INLINE', '0').lower() in ('1', 'true', 'yes')
+# Same-turn, opportunistic hint delivery. ON by default, but the feature still stays off
+# unless llm_cfg 'memory_hint_enabled' is set — this flag only selects inline vs deferred
+# delivery mode, it is not the master on/off switch. When True AND memory_hint enabled, the
+# submit at the Phase-3/4 boundary returns a completion handle and the post-Phase-4 peek
+# attaches an already-computed hint to the SAME turn as a SYSTEM note. If the worker is not
+# ready at the peek, the hint defers to the next turn (no block). NO wait budget: the peek
+# is always non-blocking, so there is no delay knob to tune. Set
+# AGENT_CASCADE_MEMORY_HINT_INLINE=0 for deferred-only delivery.
+MEMORY_HINT_INLINE: bool = os.getenv('AGENT_CASCADE_MEMORY_HINT_INLINE', '1').lower() in ('1', 'true', 'yes')
 
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
