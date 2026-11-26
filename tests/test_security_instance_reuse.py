@@ -879,6 +879,30 @@ def _make_handler(pool):
     return SecurityAdvisorHandler(pool, session, app, send_queue, lambda: None)
 
 
+def _new_event_loop_with_retry(max_attempts: int = 5, base_delay: float = 0.2):
+    """Create a fresh PER-TEST event loop, retrying on the Windows ProactorEventLoop
+    socketpair self-pipe exhaustion (OSError [WinError 10055]) that intermittently fires
+    under parallel xdist load (BUG_0423).
+
+    This is a per-test loop (each test creates and closes its own), NOT a module/collection-
+    scope shared loop — the latter is the documented anti-pattern that leaks a dangling
+    ProactorEventLoop and crashes on GC (see .agent_lessons/
+    llama-autoloader-windows-loop-flakiness.md). On non-Windows / clean runs the first
+    attempt succeeds, so this is a no-op.
+    """
+    import asyncio
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return asyncio.new_event_loop()
+        except OSError as exc:
+            # WinError 10055 (WSAEIOOP): Winsock buffer exhaustion in the proactor self-pipe.
+            # Back off briefly so the socket state settles, then retry.
+            last_exc = exc
+            time.sleep(base_delay * (attempt + 1))
+    raise last_exc
+
+
 def _make_integration_pool():
     """Minimal pool mirroring test_security_handler_deadlock_fixes._make_minimal_pool."""
     from agent_cascade.runtime_state import state
@@ -1174,7 +1198,7 @@ class TestAdvisorRunnerIntegration:
         pool = _make_integration_pool()
         # broadcast_stream_update resolves ws_queue/ws_loop from the pool and bails early if either
         # is missing — so give it a live loop + queue to reach build_stream_update_from_pool.
-        loop = asyncio.new_event_loop()
+        loop = _new_event_loop_with_retry()
         pool._ws_send_queue = asyncio.Queue(maxsize=10)
         pool._ws_loop = loop
         warm = _make_warm_instance(SECURITY_REUSE_SKILL_ADVISOR_NAME)
@@ -1201,7 +1225,7 @@ class TestAdvisorRunnerIntegration:
         instance_name — Change A must not alter the legacy path."""
         import asyncio
         pool = _make_integration_pool()
-        loop = asyncio.new_event_loop()
+        loop = _new_event_loop_with_retry()
         pool._ws_send_queue = asyncio.Queue(maxsize=10)
         pool._ws_loop = loop
         fresh_inst = MagicMock()
@@ -1249,7 +1273,7 @@ class TestAdvisorRunnerIntegration:
 
         # A live event loop + send queue so broadcast_stream_update's run_coroutine_threadsafe works.
         # (asyncio.Queue(loop=...) was removed in 3.10+; bind the loop explicitly instead.)
-        loop = asyncio.new_event_loop()
+        loop = _new_event_loop_with_retry()
         ws_queue = asyncio.Queue(maxsize=10)
         try:
             ws_queue._loop = loop
@@ -1369,7 +1393,7 @@ class TestAdvisorRunnerIntegration:
         from agent_cascade.security_handler import SecurityAdvisorHandler
         from agent_cascade.settings import SECURITY_REUSE_APPROVAL_NAME
         pool = _make_integration_pool()
-        loop = asyncio.new_event_loop()
+        loop = _new_event_loop_with_retry()
         real_queue = asyncio.Queue(maxsize=10)
         pool._ws_send_queue = real_queue
         pool._ws_loop = loop
