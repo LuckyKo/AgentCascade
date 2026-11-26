@@ -159,15 +159,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
                     sm.bump_activity_turn()
                 except Exception:
                     pass  # activity clock must never break the agent loop
-                # Task-aware skill cache boundary (root-only, fire-and-forget). Children inherit the
-                # parent's already-warmed active set, so only top-level user tasks prefetch (v1).
+                # Task-aware skill cache boundary (fire-and-forget). Fires on EVERY task boundary —
+                # root tasks AND call_agent sub-agent tasks (each carries a distinct task, so each
+                # sub-agent warms its own task's skills), once per run via the _turn_consumed guard.
                 # Acts only when both skill_cache_active_enabled and skill_cache_commit_enabled are
-                # on (the commit flag is resolved live in the worker); shadow/no-op otherwise, so it
-                # is inert in production. Off the LLM path: no turn-pipeline delay.
-                if sm._cache_enabled() and getattr(instance, 'parent_instance', None) is None:
+                # on (the commit flag is resolved live in the worker); when either is OFF it is a
+                # shadow/no-op. Off the LLM path: no turn-pipeline delay.
+                if sm._cache_enabled():
                     task_text = self._extract_cache_task_text(instance)
                     threading.Thread(
-                        target=self._run_skill_cache_boundary, args=(sm, task_text),
+                        target=self._run_skill_cache_boundary,
+                        args=(sm, task_text, getattr(instance, 'instance_name', '?')),
                         name='skill-cache-boundary', daemon=True).start()
         return turns - 1
 
@@ -188,13 +190,17 @@ class ExecutionEngine(LLMCallMixin, CompressionExecMixin, ToolExecMixin, MemoryH
             pass
         return ''
 
-    def _run_skill_cache_boundary(self, skill_manager, task_text: str) -> None:
+    def _run_skill_cache_boundary(self, skill_manager, task_text: str,
+                                  instance_name: str = '?') -> None:
         """Background worker body: prefetch then eviction tick, best-effort. Called on a daemon
-        thread from the root task boundary; never awaited by the turn pipeline."""
+        thread from any task boundary; never awaited by the turn pipeline. Emits one per-task trace
+        line so a call_agent -> prefetch is observable."""
         try:
             commit = skill_manager._cache_commit_enabled()
-            skill_manager.prefetch_for_task(task_text, commit=commit)
-            skill_manager.cache_evict_tick(commit=commit)
+            admitted = skill_manager.prefetch_for_task(task_text, commit=commit)
+            evicted = skill_manager.cache_evict_tick(commit=commit)
+            logger.info('[SKILL-CACHE] boundary instance=%s admitted=%d evicted=%d commit=%s',
+                        instance_name, len(admitted), len(evicted), commit)
         except Exception as e:  # noqa: BLE001 — the cache must never break the agent loop
             logger.debug('[SKILL-CACHE] boundary worker failed: %s', e)
 

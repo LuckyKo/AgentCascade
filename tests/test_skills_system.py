@@ -5047,7 +5047,7 @@ def _cache_active_entry(origin=None, prefetched_turn=None, last_load_turn=None):
 
 
 class _CacheRec:
-    """Records skill-cache boundary calls without touching real state (root-only guard test)."""
+    """Records skill-cache boundary calls without touching real state (boundary-firing tests)."""
     def __init__(self):
         self.calls = []
 
@@ -5062,9 +5062,11 @@ class _CacheRec:
 
     def prefetch_for_task(self, task_text, *, commit=False):
         self.calls.append(('prefetch', task_text))
+        return []  # list, mirroring the real return, so the boundary worker can len() it
 
     def cache_evict_tick(self, *, commit=False):
         self.calls.append(('evict',))
+        return []
 
 
 class TestSkillCachePhase2:
@@ -5187,10 +5189,10 @@ class TestSkillCachePhase2:
         assert m._metrics == snap_metrics
         assert m._disabled_names == snap_disabled
 
-    def test_prefetch_root_only_guard(self, tmp_path, monkeypatch):
-        """The boundary worker fires prefetch+eviction ONLY for a root run (parent_instance None);
-        a child run never invokes the worker. Worker is driven synchronously via a Thread stub (no
-        real threads / no sleeping)."""
+    def test_prefetch_fires_on_every_task_boundary(self, tmp_path, monkeypatch):
+        """The boundary worker fires prefetch+eviction for BOTH a root run (parent_instance None)
+        AND a call_agent sub-agent run (parent_instance set) — BUG_0421 lifts the old root-only
+        gate. Worker is driven synchronously via a Thread stub (no real threads / no sleeping)."""
         from agent_cascade.engine import core as ac_core
         from agent_cascade.engine.core import ExecutionEngine
 
@@ -5214,20 +5216,63 @@ class TestSkillCachePhase2:
         rec = _CacheRec()
         eng = _Eng()
         eng.pool = SimpleNamespace(skill_manager=rec)
-        root = SimpleNamespace(_turn_consumed=False, parent_instance=None,
+        root = SimpleNamespace(instance_name='root', _turn_consumed=False, parent_instance=None,
                                conversation=[{'role': 'user', 'content': 'do the task'}])
         eng._consume_turn(root, 2)
         assert any(c[0] == 'prefetch' for c in rec.calls)
         assert any(c[0] == 'evict' for c in rec.calls)
 
-        # child run → worker never runs (negative control for the root-only guard)
+        # call_agent sub-agent run → worker ALSO runs prefetch + eviction (BUG_0421: no longer gated)
         rec2 = _CacheRec()
         eng2 = _Eng()
         eng2.pool = SimpleNamespace(skill_manager=rec2)
-        child = SimpleNamespace(_turn_consumed=False, parent_instance=SimpleNamespace(),
+        child = SimpleNamespace(instance_name='child', _turn_consumed=False,
+                                parent_instance=SimpleNamespace(),
                                 conversation=[{'role': 'user', 'content': 'subtask'}])
         eng2._consume_turn(child, 2)
-        assert rec2.calls == []
+        assert any(c[0] == 'prefetch' for c in rec2.calls), 'sub-agent must prefetch its task'
+        assert any(c[0] == 'evict' for c in rec2.calls)
+
+    def test_boundary_trace_line_carries_instance_name(self, tmp_path, monkeypatch, caplog):
+        """The boundary worker emits one [SKILL-CACHE] boundary line naming the instance, so a
+        call_agent -> prefetch is observable. Driven synchronously through the Thread stub so the
+        worker runs in-process; caplog targets the SHARED app logger (agent_cascade.log.logger)."""
+        import logging
+        from agent_cascade.log import logger as app_logger
+        from agent_cascade.engine import core as ac_core
+        from agent_cascade.engine.core import ExecutionEngine
+
+        class _StubThread:
+            def __init__(self, target=None, args=(), name=None, daemon=None):
+                self._target, self._args = target, args
+
+            def start(self):
+                self._target(*self._args)
+        monkeypatch.setattr(ac_core.threading, 'Thread', _StubThread)
+
+        class _Eng:
+            _consume_turn = ExecutionEngine._consume_turn
+            _extract_cache_task_text = ExecutionEngine._extract_cache_task_text
+            _run_skill_cache_boundary = ExecutionEngine._run_skill_cache_boundary
+
+            def _telemetry(self):
+                return None
+
+        rec = _CacheRec()
+        eng = _Eng()
+        eng.pool = SimpleNamespace(skill_manager=rec)
+        child = SimpleNamespace(instance_name='trace-sub', _turn_consumed=False,
+                                parent_instance=SimpleNamespace(),
+                                conversation=[{'role': 'user', 'content': 'zebra quantum'}])
+        caplog.set_level(logging.INFO, logger=app_logger.name)
+        try:
+            eng._consume_turn(child, 2)
+        finally:
+            caplog.set_level(logging.NOTSET, logger=app_logger.name)   # never leak DEBUG/INFO
+        boundary = [r.getMessage() for r in caplog.records
+                    if '[SKILL-CACHE] boundary' in r.getMessage()]
+        assert boundary, f'expected a boundary trace line, got {[r.getMessage() for r in caplog.records]}'
+        assert 'instance=trace-sub' in boundary[-1]
 
     def test_rebalance_yields_eviction_to_cache(self, tmp_path):
         """Finding 1: once the cache owns eviction, rebalance_active_skills must NOT one-way-ratchet
