@@ -16,7 +16,7 @@ import ast
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Literal
+from typing import Dict, List, Literal, Optional, Tuple
 
 from agent_cascade.constants import DEFAULT_SECURITY_DISABLED_TOOLS
 
@@ -37,6 +37,81 @@ SOFT_TURN_LIMIT_WARNING_INTERVAL: int = 5
 SOFT_TURN_LIMIT_ABSOLUTE_MAX: int = int(
     os.getenv('AGENT_CASCADE_SOFT_TURN_LIMIT_ABSOLUTE_MAX',
               1000))  # Hard ceiling for soft mode (effectuated turns per run)
+# ── Effort level (coarse turn/nesting/budgeting preset) ────────────────────────
+# A single dial that bounds per-call turn count, nested sub-agent depth, and (via the
+# budgeting gate) whether per-call max_turns/token_budget overrides are honored. The
+# preset is read live by the engine on each run; it never mutates the persisted
+# max_turns / enable_agent_budgeting values — those keep the user's own setting and are
+# combined with the notch at enforcement time.
+EFFORT_LEVELS: Tuple[str, ...] = ('low', 'medium', 'high', 'ultra')
+
+# Default notch. 'ultra' imposes no notch cap and defers to Max Turns per Run / the
+# user's existing budgeting choice, so it is a pure no-op vs. the pre-dial engine — a
+# zero-surprise upgrade that never silently restricts an existing install. Env-backed
+# (AGENT_CASCADE_EFFORT_LEVEL); an env value outside EFFORT_LEVELS falls back to 'ultra'.
+_EFFORT_ENV_RAW = os.getenv('AGENT_CASCADE_EFFORT_LEVEL', 'ultra')
+_EFFORT_ENV_NORM = _EFFORT_ENV_RAW.strip().lower() if isinstance(_EFFORT_ENV_RAW, str) else ''
+EFFORT_LEVEL_DEFAULT: str = _EFFORT_ENV_NORM if _EFFORT_ENV_NORM in EFFORT_LEVELS else 'ultra'
+
+
+def _normalize_effort_level(value) -> str:
+    """Normalize an effort value to 'low'|'medium'|'high'|'ultra'; unknown -> EFFORT_LEVEL_DEFAULT."""
+    v = value.strip().lower() if isinstance(value, str) else ''
+    return v if v in EFFORT_LEVELS else EFFORT_LEVEL_DEFAULT
+
+
+# Public alias: the canonical normalizer (consumers import this).
+normalize_effort_level = _normalize_effort_level
+
+# Per-notch per-call turn ceiling, in turns per agent run. None (ultra) = no notch cap;
+# defer to Max Turns per Run (instance.max_turns / DEFAULT_MAX_TURNS).
+EFFORT_TURN_CAPS: Dict[str, Optional[int]] = {
+    'low': 30, 'medium': 50, 'high': 100, 'ultra': None,
+}
+
+# Per-notch nested sub-agent depth ceiling (depth of the child; 1 = direct child of the
+# root). None (ultra) = defer to pool.settings.max_nesting_depth (the server hard ceiling).
+EFFORT_NESTED_CAPS: Dict[str, Optional[int]] = {
+    'low': 1, 'medium': 2, 'high': 3, 'ultra': None,
+}
+
+
+def effort_budgeting_forced_off(level: str) -> bool:
+    """True for low/med/high: the notch is the cost control, so per-call budgeting
+    overrides are ignored. False for ultra: the user's Enable Agent Budgeting is honored."""
+    return normalize_effort_level(level) != 'ultra'
+
+
+def effective_turn_cap(requested_or_none: Optional[int], effort_level: str) -> int:
+    """Clamp a per-call turn budget by the active effort notch.
+
+    ``notch`` = EFFORT_TURN_CAPS[level]; None (ultra) defers to Max Turns per Run
+    (``requested_or_none`` is the instance's own per-run bound, which already carries the
+    pool's Max Turns per Run upstream). low/med/high return min(base, notch) — an explicit
+    request above the notch is clamped down to the notch; ultra passes the base through
+    unchanged. For a non-ultra notch the effective floor is the notch itself (>= 30).
+    """
+    notch = EFFORT_TURN_CAPS.get(normalize_effort_level(effort_level))
+    base = requested_or_none if requested_or_none else DEFAULT_MAX_TURNS
+    if notch is None:                 # ultra: no notch cap, defer to Max Turns per Run
+        return base
+    return min(base, notch)
+
+
+def effective_soft_limit_cap(initial_turns_available: int, effort_level: str) -> int:
+    """Absolute turn ceiling for the soft-turn-limit path, bounded by the active notch.
+
+    When ``soft_turn_limit`` is ON the loop may run past max_turns up to
+    SOFT_TURN_LIMIT_ABSOLUTE_MAX. For low/med/high the notch is the hard per-run
+    ceiling, so the soft path can never exceed it (otherwise ``soft_turn_limit``
+    silently defeats the effort cap). ultra has no notch, so it keeps the existing
+    ceiling — at least initial_turns_available, else SOFT_TURN_LIMIT_ABSOLUTE_MAX.
+    """
+    notch = EFFORT_TURN_CAPS.get(normalize_effort_level(effort_level))
+    base = max(initial_turns_available, SOFT_TURN_LIMIT_ABSOLUTE_MAX)
+    return base if notch is None else min(base, notch)
+
+
 # ── Token budget (cost/token-budget feature, Slice 2) ─────────────────────────
 # Optional, ADDITIVE per-instance cap on GENERATED tokens (completion-only), a
 # second mode of the turn budget. 0 (default) = disabled: turns-mode stays

@@ -293,8 +293,8 @@ def test_stack_swap_keys_registry_coverage():
         _POOL_SETTINGS_KEY_COUNT,
     )
 
-    # Counts are pinned despite the two new keys: pool is now 115, extra persist is 5.
-    assert _POOL_SETTINGS_KEY_COUNT == 115, 'pool key count must stay 115'
+    # Counts are pinned: pool is now 116 (effort_level added by BUG_0380), extra persist is 5.
+    assert _POOL_SETTINGS_KEY_COUNT == 116, 'pool key count must stay 116'
     assert _EXTRA_PERSIST_KEY_COUNT == 5, 'extra-persist key count must be 5'
 
     for key in ('enable_stack_swap', 'stack_restore_on_boot'):

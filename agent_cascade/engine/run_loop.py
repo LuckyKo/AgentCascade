@@ -24,8 +24,9 @@ from agent_cascade.llm.schema import ASSISTANT, Message
 from agent_cascade.log import logger
 from agent_cascade.budget_words import budget_allocation_notice, budget_limit_notice, budget_message
 from agent_cascade import settings as _ac_settings
-from agent_cascade.settings import (DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, SOFT_TURN_LIMIT,
-                                    SOFT_TURN_LIMIT_ABSOLUTE_MAX, SOFT_TURN_LIMIT_WARNING_INTERVAL)
+from agent_cascade.settings import (DEFAULT_TOKEN_BUDGET, EFFORT_LEVEL_DEFAULT, SOFT_TURN_LIMIT,
+                                    SOFT_TURN_LIMIT_WARNING_INTERVAL,
+                                    effective_soft_limit_cap, effective_turn_cap, normalize_effort_level)
 from agent_cascade.tool_utils import clear_truncation_state
 from agent_cascade.utils.streaming import (current_stream_reader_done, reset_stream_reader_done,
                                            stream_reader_in_flight)
@@ -44,6 +45,27 @@ class _RunAction(Enum):
 
 class RunLoopMixin:
     """Main turn-loop orchestration and phase dispatch."""
+
+    def _effort_level(self) -> str:
+        """Live effort notch for this agent's pool (UI-editable, no restart)."""
+        return normalize_effort_level(self._get_pool_setting('effort_level', EFFORT_LEVEL_DEFAULT))
+
+    def _effort_max_turns(self, requested) -> int:
+        """Clamp a run's turn budget by the active effort notch.
+
+        ``requested`` is the instance's own per-run bound (instance.max_turns, or None).
+        'ultra' returns ``requested or DEFAULT_MAX_TURNS`` (behavior unchanged — the pool
+        max_turns is already written onto instance.max_turns upstream, so it is not
+        re-applied here); low/med/high additionally clamp it down to the notch."""
+        return effective_turn_cap(requested, self._effort_level())
+
+    def _effort_allows_auto_skill(self) -> bool:
+        """True when the effort notch permits the auto-skill reflection extension.
+
+        low/med/high suppress it: the notch is the user's chosen effort ceiling, so
+        granting fresh reflection turns would push a capped run past it. ultra leaves
+        the existing extension behavior untouched."""
+        return self._effort_level() == 'ultra'
 
     def run(self, instance: AgentInstance) -> Iterator[Union[List[Message], tuple[List[Message], bool], None]]:
         """Execute the agent's turn loop as a generator yielding state updates.
@@ -80,7 +102,10 @@ class RunLoopMixin:
                 early_exit = True
                 return
 
-            max_turns = instance.max_turns or DEFAULT_MAX_TURNS
+            # Per-run turn ceiling clamped by the active effort notch. 'ultra' keeps the
+            # historic `instance.max_turns or DEFAULT_MAX_TURNS`; low/med/high clamp it
+            # down to the notch. The soft ceiling below is bounded by the same notch.
+            max_turns = self._effort_max_turns(instance.max_turns)
             turns_available = max_turns
             # BUG_0140: number of turns available for THIS run, frozen at start. The
             # last-turn/turn-limit messages must only fire when the run had > 1 turn
@@ -92,7 +117,9 @@ class RunLoopMixin:
             # budget warnings; SOFT_TURN_LIMIT_ABSOLUTE_MAX is the safety ceiling (never
             # below the configured hard cap). Default OFF preserves the hard stop.
             soft_turn_limit = bool(self._get_pool_setting('soft_turn_limit', SOFT_TURN_LIMIT))
-            soft_limit_absolute_cap = max(initial_turns_available, SOFT_TURN_LIMIT_ABSOLUTE_MAX)
+            # The effort notch is a hard per-run ceiling, so bound the soft-limit absolute
+            # ceiling by it too (else soft_turn_limit ON silently defeats the notch).
+            soft_limit_absolute_cap = effective_soft_limit_cap(initial_turns_available, self._effort_level())
             # Over-limit warning bookkeeping (only used when soft_turn_limit is ON).
             _soft_limit_last_warn_past = 0
             inst_name = instance.instance_name
@@ -285,7 +312,7 @@ class RunLoopMixin:
             # FAILED trigger (gates pass but auto_skill_qualifies returns no prompt) this
             # condition is False and control falls through to the normal `yield; continue`
             # below, so the loop exits on the exhausted budget with no flag poisoning.
-            if is_last_original_turn and \
+            if self._effort_allows_auto_skill() and is_last_original_turn and \
                     self._try_auto_skill_extension(
                         instance, messages, llm_messages,
                         loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
@@ -331,7 +358,7 @@ class RunLoopMixin:
                 # and pushes 'post'. See _tg_push_final for dedup/retry semantics.
                 _tg_push_final(instance, response, self.pool,
                                phase='post' if getattr(instance, '_auto_skill_proposed', False) else 'pre')
-                if self._try_auto_skill_extension(
+                if self._effort_allows_auto_skill() and self._try_auto_skill_extension(
                         instance, messages, llm_messages,
                         loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
                     # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh

@@ -1144,7 +1144,15 @@ class ToolDispatcher:
         Returns:
             Error message if depth exceeded, None otherwise
         """
-        max_depth = self.pool.settings.max_nesting_depth if hasattr(self.pool, 'settings') else 10
+        from agent_cascade.settings import (EFFORT_LEVEL_DEFAULT, EFFORT_NESTED_CAPS,
+                                            normalize_effort_level)
+        # Effort notch further bounds nested depth. 'ultra' (notch None) defers to the
+        # server ceiling; low/med/high take min(server, notch) so a tighter server cap wins.
+        ps = getattr(self.pool, 'settings', None)
+        server_cap = getattr(ps, 'max_nesting_depth', 10)
+        notch = EFFORT_NESTED_CAPS.get(
+            normalize_effort_level(getattr(ps, 'effort_level', EFFORT_LEVEL_DEFAULT)))
+        max_depth = server_cap if notch is None else min(server_cap, notch)
         caller_name = instance.instance_name
         logger.debug('call_agent nesting - %s depth=%d/%d', caller_name, child_depth, max_depth)
         if child_depth > max_depth:

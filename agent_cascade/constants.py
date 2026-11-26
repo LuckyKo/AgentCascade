@@ -268,6 +268,7 @@ NON_LLM_KEYS: tuple[str, ...] = (
     'token_budget',  # Cost/token-budget Slice 2: execution control, must NOT leak to LLM API
     'budget_unit',   # Cost/token-budget Slice 2: 'turns'|'tokens' mode marker, execution control only
     'enable_agent_budgeting',
+    'effort_level',  # Coarse turn/nesting/budgeting preset, execution control only, must NOT leak to LLM API
     'allow_parallel_agents',
     'state_kv_save_enabled',
     'unload_unused_tools_post_compression',

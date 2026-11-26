@@ -163,6 +163,9 @@ const POOL_SETTINGS_MAP = [
   { id: '#setting-max-rollbacks', prop: 'value', key: 'max_auto_rollbacks' },
   { id: '#setting-auto-rollback', prop: 'checked', key: 'auto_rollback_on_loop' },
   { id: '#setting-agent-budgeting', prop: 'checked', key: 'enable_agent_budgeting' },
+  // Effort preset: a single <select> whose value IS the notch string (low|medium|high|ultra),
+  // so prop:'value' round-trips cleanly with no transform/index mapping.
+  { id: '#effort-slider', prop: 'value', key: 'effort_level' },
   { id: '#setting-allow-parallel', prop: 'checked', key: 'allow_parallel_agents' },
   { id: '#setting-unload-unused-mcp', prop: 'checked', key: 'unload_unused_tools_post_compression' },
   // state_kv_save_enabled = automatic checkpoint toggle only (Security/compression saves);
@@ -7058,6 +7061,15 @@ if ($('#restart-server-btn')) {
         window.location.reload();
       }, 3000);
     }
+  });
+}
+
+// Effort slider: the select's value IS the notch string (low|medium|high|ultra), sent
+// verbatim as the effort_level pool key via the debounced delta path. Hydration + reject
+// revert are map-driven (see POOL_SETTINGS_MAP entry for effort_level).
+if ($('#effort-slider')) {
+  $('#effort-slider').addEventListener('change', (e) => {
+    queueSettingChange('effort_level', e.target.value);
   });
 }
 

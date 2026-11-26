@@ -18,7 +18,8 @@ from agent_cascade.constants import NON_LLM_KEYS
 from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.exceptions import LogFileNotFoundError
 from agent_cascade.log import logger
-from agent_cascade.settings import DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET
+from agent_cascade.settings import (DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET,
+                                    EFFORT_LEVEL_DEFAULT, effort_budgeting_forced_off)
 from agent_cascade.budget_words import budget_allocation_notice
 from agent_cascade.shared_init import STABLE_SYSTEM_PROMPT_CLASSES
 
@@ -897,8 +898,16 @@ class AgentLifecycleManager:
             # overrides via call_agent args.
             # Otherwise, all agents use the caller's max_turns limit regardless
             # of call_agent args.
-            enable_agent_budgeting = getattr(self.pool.settings, 'enable_agent_budgeting', True) if hasattr(
-                self.pool, 'settings') else True
+            # Effort gate: low/med/high force budgeting OFF at READ time (the notch is
+            # the cost control) so the explicit per-call overrides below are ignored —
+            # without overwriting the stored toggle, so switching back to 'ultra'
+            # restores the user's choice verbatim. 'ultra' honors the stored value.
+            _effort = getattr(getattr(self.pool, 'settings', None), 'effort_level', EFFORT_LEVEL_DEFAULT)
+            if effort_budgeting_forced_off(_effort):
+                enable_agent_budgeting = False
+            else:
+                enable_agent_budgeting = getattr(self.pool.settings, 'enable_agent_budgeting', True) if hasattr(
+                    self.pool, 'settings') else True
 
             # Use provided max_turns from call_agent args if specified,
             # otherwise inherit from caller.

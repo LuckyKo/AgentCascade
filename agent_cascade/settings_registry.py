@@ -66,7 +66,7 @@ _POOL_KEYS: Tuple[str, ...] = (
     'compression_context_reserve_tokens', 'compression_force_cooldown', 'compression_force_threshold',
     'compression_max_attempts', 'compression_proactive_threshold', 'compression_timeout',
     'compression_warning_threshold', 'default_load_skill_mode', 'default_workspace',
-    'dismiss_thread_join_timeout', 'enable_agent_budgeting', 'enable_approval_timeout',
+    'dismiss_thread_join_timeout', 'effort_level', 'enable_agent_budgeting', 'enable_approval_timeout',
     'enable_async_shell_console_window', 'endpoint_max_retries', 'grep_char_limit', 'grep_spillover',
     'idle_check_interval', 'idle_timeout_seconds', 'image_caption_mode', 'inner_loop_detect_enabled',
     'list_dir_char_limit', 'loop_char_run_enabled', 'loop_char_run_limit', 'loop_confirm_required',
@@ -550,7 +550,7 @@ def spec(key: str) -> SettingSpec:
 
 #: Drift guard: the pinned sizes of the derived compat key sets. Adding/removing a
 #: persisted key updates these on purpose (a silent size change is a bug).
-_POOL_SETTINGS_KEY_COUNT: int = 115
+_POOL_SETTINGS_KEY_COUNT: int = 116
 _EXTRA_PERSIST_KEY_COUNT: int = 5
 
 

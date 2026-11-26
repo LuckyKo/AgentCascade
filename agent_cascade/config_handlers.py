@@ -1199,6 +1199,18 @@ def _handle_enable_agent_budgeting(ui_cfg: dict, agent_pool: Optional[Any], agen
         agent_pool.settings.enable_agent_budgeting = val
 
 
+@register_config_handler('effort_level')
+def _handle_effort_level(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Set the effort preset ('low'|'medium'|'high'|'ultra').
+
+    The preset is read live by the engine (turn/nest/budgeting gates) on each run; it
+    does not mutate the persisted max_turns / enable_agent_budgeting values — those keep
+    the user's own setting and are combined with the notch at enforcement time."""
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        from agent_cascade.settings import normalize_effort_level
+        agent_pool.settings.effort_level = normalize_effort_level(ui_cfg['effort_level'])
+
+
 @register_config_handler('allow_parallel_agents')
 def _handle_allow_parallel_agents(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):

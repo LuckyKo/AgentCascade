@@ -281,6 +281,30 @@ body {
   flex-basis: 100%;
 }
 
+/* Effort slider: full-width row under Restart Server; select mirrors the sidebar-input look. */
+.sidebar-actions .sidebar-effort {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.effort-select {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--text, inherit);
+  background: var(--bg-input, transparent);
+  border: 1px solid var(--border, var(--text-muted));
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.effort-select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
 /* ─── Step 11: Agent-Specific Visual Identity via CSS Custom Properties ───────────────────── */
 /* Subtle accent colors per agent type — applied via [data-instance-name] attribute on message elements */
 [data-instance-name="coder"] .msg-header { border-bottom-color: #58a6ff; }

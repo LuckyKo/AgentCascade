@@ -87,6 +87,16 @@
               </svg>
               <span>Restart Server</span>
             </button>
+            <div class="sidebar-effort">
+              <label class="sidebar-label" for="effort-slider">Effort</label>
+              <select id="effort-slider" class="effort-select"
+                      title="Effort bounds per-call turns + nested sub-agents + budgeting. low=30 turns/1 sub-agent · medium=50/2 · high=100/3 · ultra=no cap">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="ultra" selected>Ultra</option>
+              </select>
+            </div>
           </div>
 
           <div class="sidebar-divider"></div>
