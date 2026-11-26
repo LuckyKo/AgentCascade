@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from agent_cascade import settings
 from agent_cascade.agent_identity import display_label, get_display_name
-from agent_cascade.agent_instance import AgentInstance, AgentState
+from agent_cascade.agent_instance import AgentInstance, AgentState, ACTIVE_STATES
 from agent_cascade.agent_pool import AgentPool
 from agent_cascade.api_integration_pkg.cache import (_PREFIX_CACHE_MAXSIZE, _TOKEN_STATS_CACHE_MAXSIZE, _cache_mgr,
                                                      _get_ui_cache, _store_ui_cache)
@@ -608,6 +608,43 @@ def build_instance_status_from_pool(pool) -> Optional[Dict[str, Dict[str, Any]]]
     return status
 
 
+def _pool_has_active_instance(pool) -> bool:
+    """Session-level "is anything generating?" signal for the global UI latch.
+
+    This drives the client's single global ``state.generating`` flag (app.js), which is why
+    it MUST be pool-wide and NEVER the named instance's state. A ``stream_update`` is also
+    built for a brand-new/IDLE sub-agent at boot, or for an idle / cross-tab instance, while
+    the root is still RUNNING — reporting that single instance's bit would unlatch the global
+    UI mid-turn (spurious "New Session" / "Refresh Soul" enable). "Active" means
+    ``state in ACTIVE_STATES`` (RUNNING/SLEEPING/COMPLETING); SLEEPING (waiting on async
+    tools) and COMPLETING (cleanup) are still mid-turn, so the latch must stay up.
+
+    Mirrors the thread-safe read in ``build_instance_status_from_pool``: iterate a snapshot
+    of ``pool.instances`` and read each ``inst.state`` under ``inst._state_lock``.
+
+    Fail-open (returns True) on any read error — lowering the latch on incomplete evidence
+    would fake-idle a live run, the same reason that helper returns ``None`` rather than a
+    partial map.
+    """
+    instances = getattr(pool, 'instances', None) if pool is not None else None
+    if not isinstance(instances, dict):
+        return False
+    for _name, inst in list(instances.items()):
+        try:
+            lock = getattr(inst, '_state_lock', None)
+            if lock is not None:
+                with lock:
+                    current_state = inst.state
+            else:
+                current_state = inst.state
+        except Exception as e:
+            logger.debug(f"generating signal unreliable (instance {_name!r}): {e}")
+            return True
+        if current_state in ACTIVE_STATES:
+            return True
+    return False
+
+
 def build_stream_update_from_pool(
     pool: AgentPool,
     instance_name: str,
@@ -723,7 +760,14 @@ def build_stream_update_from_pool(
         # the dedicated {'type':'approvals'} WS message broadcast by _approval_loop; a
         # stream tick built before an approval is registered would carry a stale [] and,
         # if included, clobber live approval state on the client (banner disappears).
-        'generating': True,
+        # Session-level "is anything generating?" signal for the GLOBAL client latch — must
+        # NOT be the named instance's bit (see _pool_has_active_instance). The active
+        # streaming loop runs while some instance is RUNNING (so this stays True and the
+        # client latch stays latched). request_state (tab click) and the periodic force_full
+        # can also build a frame for an IDLE cross-tab instance or a new sub-agent, or for a
+        # SLEEPING root — under any of those, if NOTHING is active the old hardcoded True
+        # (and a naive per-instance read) falsely locked New Session / Refresh Soul.
+        'generating': _pool_has_active_instance(pool),
         'total_tokens': h_stats['tokens'] + r_stats['tokens'] + schema_tokens,
         'total_words': h_stats['words'] + r_stats['words'],
         'max_tokens': max_tokens,

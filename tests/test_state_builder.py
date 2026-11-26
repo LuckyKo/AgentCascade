@@ -450,3 +450,102 @@ def test_serialize_message_bare_number_content_stringifies():
             {'role':'assistant','content':content_in}, index=None, use_cache=False, for_ui=True)
         assert out['content'] == expected, f"{content_in!r} -> {out['content']!r}"
         assert isinstance(out['content'], str)
+
+
+# ---------------------------------------------------------------------------
+# Invariant: stream_update reports a SESSION-LEVEL "anything generating?" flag.
+# ---------------------------------------------------------------------------
+# The frame is built for a NAMED instance, but the flag drives the GLOBAL client
+# state.generating latch, so it must be "is ANY instance in the pool active" (state in
+# ACTIVE_STATES = RUNNING/SLEEPING/COMPLETING), NEVER the named instance's own bit. A
+# tab-click request_state or a new-sub-agent boot builds a frame for an IDLE instance
+# while the root still streams — a per-instance read would unlatch the global UI mid-turn
+# (spurious New Session / Refresh Soul enable). Pins both the original stopped-tab lock
+# (all idle -> False) and the per-instance over-correction (idle frame while a peer is
+# active -> True).
+
+from agent_cascade.agent_instance import AgentState
+
+
+def _set_pool_instances(pool, named_state, *extra_states):
+    """Populate pool.instances with lock-guarded AgentState instances.
+
+    ``named_state`` is the state of the 'Maine' instance (what _build_stream_update builds
+    a frame FOR). ``extra_states`` are additional pool instances (e.g. a RUNNING root).
+    Mirrors how _pool_has_active_instance reads inst._state_lock then inst.state.
+    """
+    named = pool.get_instance.return_value          # already has conversation=[] etc.
+    named.state = named_state
+    named._state_lock = threading.RLock()
+    # Keep is_running consistent with the state so these pins also fail the OLD per-instance
+    # `bool(instance.is_running)` implementation (SLEEPING and idle-frame-while-peer-active),
+    # not just vacuously pass the new session-level one.
+    named.is_running = (named_state == AgentState.RUNNING)
+    pool.instances = {'Maine': named}
+    for idx, state in enumerate(extra_states):
+        peer = MagicMock()
+        peer.state = state
+        peer._state_lock = threading.RLock()
+        peer.conversation = []
+        peer._streaming_responses = None
+        peer._compression_lock = threading.Lock()
+        peer.compression_summary = ''
+        pool.instances[f'peer_{idx}'] = peer
+    return named
+
+
+def test_stream_update_generating_false_when_nothing_active():
+    """All instances IDLE (fresh restart / stopped session) -> generating=False."""
+    pool = _make_fake_pool([])
+    _set_pool_instances(pool, AgentState.IDLE)      # only the named instance, IDLE
+    result = _build_stream_update(pool)
+    assert result is not None
+    assert result['generating'] is False, (
+        'with nothing active in the pool the frame must report generating=False so the '
+        'client lowers the latch and re-enables New Session / Refresh Soul (the original '
+        'stopped-tab lock was a hardcoded True)'
+    )
+
+
+def test_stream_update_generating_true_for_named_running_instance():
+    """Named instance RUNNING -> generating=True (streaming stays latched)."""
+    pool = _make_fake_pool([])
+    _set_pool_instances(pool, AgentState.RUNNING)
+    result = _build_stream_update(pool)
+    assert result is not None
+    assert result['generating'] is True, (
+        'a running instance must keep generating=True so the client latch stays latched '
+        'and streaming is not prematurely unlocked'
+    )
+
+
+def test_stream_update_generating_true_while_agent_sleeps():
+    """An agent waiting on async tools (SLEEPING) is still mid-turn -> generating=True."""
+    pool = _make_fake_pool([])
+    _set_pool_instances(pool, AgentState.SLEEPING)
+    result = _build_stream_update(pool)
+    assert result is not None
+    assert result['generating'] is True, (
+        'SLEEPING is an active (mid-turn) state; generating must stay True so a snapshot '
+        'of a sleeping agent never fakes-idle a live run'
+    )
+
+
+def test_stream_update_generating_true_for_idle_frame_while_root_running():
+    """Major-2 regression: frame built for an IDLE new sub-agent while a root RUNS.
+
+    request_state / boot build a stream_update FOR the idle sub-agent (named instance IDLE)
+    while the root is still RUNNING elsewhere in the pool. Because the flag is global it
+    must stay True — a per-instance read of the named (IDLE) instance would unlatch the
+    client mid-turn on every sub-agent spawn.
+    """
+    pool = _make_fake_pool([])
+    _set_pool_instances(pool, AgentState.IDLE, AgentState.RUNNING)  # Maine idle, root running
+    # The frame we build FOR is itself idle, so True can only come from the session scan.
+    assert pool.get_instance.return_value.state is AgentState.IDLE
+    result = _build_stream_update(pool)
+    assert result is not None
+    assert result['generating'] is True, (
+        'a frame built for an IDLE sub-agent while the root is RUNNING must report '
+        'generating=True (session-level), else the client unlatches mid-turn on spawn'
+    )

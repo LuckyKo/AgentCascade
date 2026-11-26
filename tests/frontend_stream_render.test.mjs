@@ -688,3 +688,64 @@ test('D2: completed reasoning must be markdown-formatted (not raw-appended text)
 
   console.log('✔ D2 assertions passed — completed reasoning is markdown-formatted.');
 });
+
+
+// ── Generating latch: a stopped/blank-tab snapshot must LOWER the latch ───────
+// Regression for the stopped-tab button-lock bug (the "New Session" / "Refresh Soul"
+// buttons locked after clicking a stopped/blank agent's tab). Root cause: the client's
+// stream_update handler set `state.generating = true` unconditionally, so ANY snapshot —
+// including a request_state snapshot of a stopped/IDLE instance triggered by a tab click —
+// re-locked the UI with no generation running.
+//
+// The fix is two-sided: the server now emits `'generating': bool(instance.is_running)`
+// (see build_stream_update_from_pool), and the client honours it via
+// `state.generating = data.generating ?? true`. These tests pin the CLIENT half against the
+// REAL handler (no reimplementation) using the same vm harness as the render-cadence tests.
+test('stream_update with generating=false lowers the generating latch (stopped tab)', () => {
+  const app = loadApp();
+  const { state, handleServerMessage, clock, sessionName } = app;
+
+  // Start with the latch true — the state the UI is in during/right-after generation, and
+  // the only state from which "lowering it" is observable. (Mirrors what the real latch is
+  // when the request_state frame for a just-clicked blank tab arrives.)
+  state.generating = true;
+
+  clock.advance(40);
+  // The request_state snapshot for a stopped/blank tab: inactive IDLE instance, and now
+  // correctly reporting generating=false. This is the exact frame shape build_stream_update_from_pool
+  // emits for a non-RUNNING instance.
+  const frame = {
+    ...makeUpdate({
+      name: sessionName, content: '', historyCount: 2, isPartial: false,
+      active: false, agentState: 'IDLE',
+    }),
+    generating: false,
+  };
+  handleServerMessage(frame);
+
+  assert.equal(state.generating, false,
+    'a stopped/idle tab snapshot (generating:false) must lower the latch so New Session ' +
+    'and Refresh Soul re-enable; pre-fix the handler forced this true unconditionally');
+
+  console.log('✔ stopped-tab snapshot lowers generating latch.');
+});
+
+test('stream_update WITHOUT a generating field stays latched (?? true backward-compat)', () => {
+  const app = loadApp();
+  const { state, handleServerMessage, clock, sessionName } = app;
+
+  // Start idle, then deliver a legacy frame (makeUpdate emits no `generating` field). The
+  // `?? true` fallback must latch it true so an older server (or a frame that simply omits
+  // the field during real streaming) never unlocks the UI.
+  state.generating = false;
+  clock.advance(40);
+  handleServerMessage(makeUpdate({
+    name: sessionName, content: 'live', historyCount: 3, isPartial: false,
+    active: true, agentState: 'RUNNING',
+  }));
+
+  assert.equal(state.generating, true,
+    'a stream_update frame without a generating field must latch true (?? true backward-compat)');
+
+  console.log('✔ legacy stream_update frame (no generating field) stays latched true.');
+});

@@ -2276,10 +2276,11 @@ function withRetry(conditionFn, actionFn) {
  * Apply a lightweight `status` heartbeat frame from the server (BUG_0142).
  *
  * The server pushes this frame only when the WebSocket has been quiet for a while
- * (api_server._idle_status_loop). Its job is to repair the one-way `state.generating`
- * latch: the flag goes true on every stream_update but is only ever lowered by a full
- * state/done frame, so a lost closing `done` frame left the UI stuck on "Generating..."
- * (messages then inject into the "active" run, Continue/Retry disabled) until a refresh.
+ * (api_server._idle_status_loop). Its job is to repair the `state.generating` latch: the
+ * flag normally goes true on a stream_update for an active run, but a frame can now also
+ * lower it (`stream_update`/`state`/`done`/`status` all carry a session-level `generating`
+ * value). This frame is the safety net for a lost closing `done`: if nothing is active it
+ * re-states generating=false so the UI does not stay stuck on "Generating..." until a refresh.
  *
  * Safety rules:
  *  - Per-instance flags from the frame are always applied — they are authoritative and cheap.
@@ -2791,7 +2792,12 @@ function handleServerMessage(data) {
         state.genStats.lastSubAgentRender = 0;
         state.genStats.lastSubAgentRenderDuration = 0;
       }
-      state.generating = true;
+      // Respect the server-reported generating state. The stream_update frame now carries
+      // 'generating' = bool(instance.is_running), so a snapshot of a stopped/idle instance
+      // (request_state on a blank tab click, periodic force_full) lowers the latch instead
+      // of re-locking it. `?? true` preserves backward-compat for legacy frames that omit
+      // the field, and for real streaming (instance RUNNING → true → stays latched).
+      state.generating = data.generating ?? true;
       const newStackStr = (state.activeStack || []).join(',');
       const stackChanged = oldStackStr !== newStackStr;
 
