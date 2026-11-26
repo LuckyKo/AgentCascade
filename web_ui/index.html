@@ -89,7 +89,7 @@
             </button>
             <div class="sidebar-effort">
               <label class="sidebar-label" for="effort-slider">Effort</label>
-              <select id="effort-slider" class="effort-select"
+              <select id="effort-slider" class="effort-select" autocomplete="off"
                       title="Effort bounds per-call turns + nested sub-agents + budgeting. low=30 turns/1 sub-agent · medium=50/2 · high=100/3 · ultra=no cap">
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -1254,7 +1254,7 @@
         <h3>Import log / JSON</h3>
         <button id="import-modal-close" class="btn-icon-sm">✕</button>
       </div>
-      <div class="session-search"><input type="text" id="importFilter" placeholder="Filter logs..." /></div>
+      <div class="session-search"><input type="text" id="importFilter" placeholder="Filter logs..." autocomplete="off" /></div>
       <div id="importList" class="sessions-list" style="overflow:auto;flex:1;"></div>
       <div class="modal-actions">
         <button id="importAddBtn" class="btn btn-secondary">Add to current session</button>
@@ -1273,7 +1273,7 @@
         a terminal on this machine. Complete the Google sign-in there, then click "Re-check auth".
         You only need to do this once — later runs reuse the saved token.
       </p>
-      <textarea id="cli-agent-oauth-cmd" readonly rows="3" spellcheck="false"
+      <textarea id="cli-agent-oauth-cmd" readonly rows="3" spellcheck="false" autocomplete="off"
                 style="width:100%;padding:6px;margin-bottom:10px;box-sizing:border-box;font-family:monospace;font-size:12px;"
                 placeholder="loading…"></textarea>
       <div id="cli-agent-oauth-status" style="min-height:18px;margin-bottom:10px;color:var(--text-muted,#aaa);"></div>
