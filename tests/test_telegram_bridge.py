@@ -85,6 +85,9 @@ class _MockACServer:
         self.command_calls = []     # paths of command endpoints hit (token-auth)
         self.fail_status_once_with_401 = False
         self._status_script = []    # queued 'generating' values to return in order
+        self.settings_patches = []   # JSON bodies of PATCH /api/settings (open endpoint)
+        self.settings_params = []    # query params of each PATCH /api/settings (assert no token)
+        self.settings_revision = 1   # echoed in the PATCH /api/settings response
 
     def _server_handshake(self, client_pub_b64: str) -> bytes:
         client_public_key = x25519.X25519PublicKey.from_public_bytes(
@@ -156,6 +159,17 @@ class _MockACServer:
             if not token or token not in self.sessions:
                 return httpx.Response(401, json={'message': 'Invalid session token'})
             return httpx.Response(200, json={'status': 'ok', 'path': path})
+
+        # PATCH /api/settings is an OPEN endpoint (mirrors api_server.py:2008 — no token
+        # parameter, no auth check). Echo an applied set so set_effort sees success.
+        if request.method == 'PATCH' and path == '/api/settings':
+            body = json.loads(request.content)
+            self.settings_patches.append(body)
+            self.settings_params.append(dict(request.url.params))
+            return httpx.Response(200, json={
+                'revision': self.settings_revision,
+                'applied': {'effort_level': body.get('effort_level')},
+                'rejected': {}})
 
         return httpx.Response(404, json={'message': f'no route {path}'})
 
@@ -1135,7 +1149,7 @@ def _cmd_ac(**overrides):
     """
     ac = MagicMock()
     for m in ('inject_message', 'reset', 'approve', 'reject', 'stop', 'restart',
-              'set_auto_security', 'set_afk', 'restore_session', 'save_kv', 'load_kv'):
+              'set_auto_security', 'set_afk', 'set_effort', 'restore_session', 'save_kv', 'load_kv'):
         setattr(ac, m, AsyncMock(return_value={}))
     # ensure_token is async and returns (token, shared_secret).
     ac.ensure_token = AsyncMock(return_value=('tok_test', b'secret'))
@@ -1179,7 +1193,9 @@ def test_registry_contains_v1_command_set():
                 # Added by the manual Save/Load KV buttons (todo #109).
                 'savekv', 'loadkv',
                 # Added by the BUG_0323 S5 stack-swap surface (both gated off-path).
-                'snapshot', 'stack'}
+                'snapshot', 'stack',
+                # Added by BUG_0412 (effort notch from Telegram).
+                'effort'}
     assert set(COMMANDS) == expected
     # Every handler has a non-empty description (used by /help).
     for name, cmd in COMMANDS.items():
@@ -1202,6 +1218,7 @@ def test_registry_contains_v1_command_set():
     ('/savekv agent-2', 'save_kv', call('agent-2')),
     ('/loadkv', 'load_kv', call(None)),
     ('/loadkv agent-2', 'load_kv', call('agent-2')),
+    ('/effort high', 'set_effort', call('high')),
 ])
 def test_command_calls_right_client_method(text, method, expected):
     """Each registered command routes to the correct ACClient method with right args."""
@@ -1528,6 +1545,130 @@ def test_cmd_afk_bogus_arg_replies_usage():
     ac.inject_message.assert_not_called()
 
 
+def _effort_caps():
+    """Caps mirroring settings.EFFORT_* defaults, for the non-sentinel /effort tests."""
+    return ({'low': 30, 'medium': 50, 'high': 100, 'ultra': None},
+            {'low': 1, 'medium': 3, 'high': 7, 'ultra': None})
+
+
+def test_cmd_effort_valid_notch_replies_caps():
+    """/effort high applies via set_effort and replies with caps read from the snapshot."""
+    tc, nc = _effort_caps()
+    ac = _cmd_ac(
+        set_effort=AsyncMock(return_value={'revision': 2,
+                                           'applied': {'effort_level': 'high'}, 'rejected': {}}),
+        get_state=AsyncMock(return_value={'pool_settings': {
+            'effort_level': 'high', 'effort_turn_caps': tc, 'effort_nested_caps': nc}}))
+    update, context, ac, sent = _cmd_context('/effort high', ac=ac)
+    _run(on_message(update, context))
+    ac.set_effort.assert_awaited_once_with('high')
+    assert len(sent) == 1
+    reply = sent[0]
+    assert 'High' in reply
+    assert '100 turns' in reply
+    assert '7 sub' in reply
+    assert 'budgeting on' in reply
+    ac.inject_message.assert_not_called()
+
+
+def test_cmd_effort_ultra_replies_no_cap_budgeting_off():
+    """'/effort ultra' pins the ultra-specific format: 'no cap' and 'budgeting off'.
+
+    Guards R4 (terminology trap): the DISPLAY label is ultra→off/else→on (web_ui/app.js:475),
+    NOT the inverted effort_budgeting_forced_off flag. If the label is ever flipped this reds.
+    """
+    tc, nc = _effort_caps()
+    ac = _cmd_ac(
+        set_effort=AsyncMock(return_value={'revision': 3,
+                                           'applied': {'effort_level': 'ultra'}, 'rejected': {}}),
+        get_state=AsyncMock(return_value={'pool_settings': {
+            'effort_level': 'ultra', 'effort_turn_caps': tc, 'effort_nested_caps': nc}}))
+    update, context, ac, sent = _cmd_context('/effort ultra', ac=ac)
+    _run(on_message(update, context))
+    ac.set_effort.assert_awaited_once_with('ultra')
+    assert len(sent) == 1
+    reply = sent[0].lower()
+    assert 'no cap' in reply
+    assert 'budgeting off' in reply
+    assert 'sub' not in reply          # ultra nested cap is None → no 'N sub' segment
+
+
+def test_cmd_effort_invalid_notch_replies_usage_no_client_call():
+    """'/effort bogus' is rejected client-side; set_effort is NEVER called."""
+    update, context, ac, sent = _cmd_context('/effort bogus')
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    assert 'Usage' in sent[0]
+    ac.set_effort.assert_not_called()
+    ac.inject_message.assert_not_called()
+
+
+def test_cmd_effort_bare_reports_current_level_from_state():
+    """Bare /effort reports the current notch + caps from get_state(), no set_effort call."""
+    tc, nc = _effort_caps()
+    ac = _cmd_ac(get_state=AsyncMock(return_value={'pool_settings': {
+        'effort_level': 'medium', 'effort_turn_caps': tc, 'effort_nested_caps': nc}}))
+    update, context, ac, sent = _cmd_context('/effort', ac=ac)
+    _run(on_message(update, context))
+    ac.set_effort.assert_not_called()
+    assert len(sent) == 1
+    reply = sent[0]
+    assert 'Medium' in reply
+    assert '50 turns' in reply
+    assert '3 sub' in reply
+    assert 'budgeting on' in reply
+
+
+def test_cmd_effort_caps_follow_state_not_hardcoded():
+    """Single-source-of-truth proof: reply renders SENTINEL caps from the snapshot,
+    distinct from the settings.EFFORT_* defaults — proving the reply follows the server,
+    not a transcription baked into commands.py. (Discipline from
+    effort-caps-sidebar-description.md.)"""
+    sentinel_tc = {'low': 11, 'medium': 22, 'high': 999, 'ultra': None}
+    sentinel_nc = {'low': 5, 'medium': 6, 'high': 42, 'ultra': None}
+    ac = _cmd_ac(
+        set_effort=AsyncMock(return_value={'revision': 4,
+                                           'applied': {'effort_level': 'high'}, 'rejected': {}}),
+        get_state=AsyncMock(return_value={'pool_settings': {
+            'effort_level': 'high', 'effort_turn_caps': sentinel_tc,
+            'effort_nested_caps': sentinel_nc}}))
+    update, context, ac, sent = _cmd_context('/effort high', ac=ac)
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    reply = sent[0]
+    assert '999 turns' in reply   # sentinel turn cap, NOT the default 100
+    assert '42 sub' in reply      # sentinel nested cap, NOT the default 7
+
+
+def test_cmd_effort_server_reject_replies_honest_failure():
+    """When the server rejects (applied=={}), the reply is an honest warning — not a fake success."""
+    ac = _cmd_ac(set_effort=AsyncMock(return_value={'applied': {},
+                                                    'rejected': {'effort_level': 'invalid'}}))
+    update, context, ac, sent = _cmd_context('/effort high', ac=ac)
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    assert sent[0].startswith('⚠️')
+    assert 'invalid' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
+def test_cmd_effort_empty_applied_uses_default_mock():
+    """The default _cmd_ac (set_effort -> AsyncMock(return_value={})) yields an empty
+    'applied' and surfaces the honest 'server did not apply' fallback.
+
+    This is the guard that pins set_effort being in the _cmd_ac AsyncMock tuple: without
+    it, ac.set_effort is a bare (non-awaitable) MagicMock; awaiting it raises TypeError,
+    which dispatch_command turns into a generic '⚠️ … hit an unexpected error.' reply, so
+    the specific fallback text never appears and this reds.
+    """
+    update, context, ac, sent = _cmd_context('/effort high')  # default mock, no overrides
+    _run(on_message(update, context))
+    assert len(sent) == 1
+    assert sent[0].startswith('⚠️')
+    assert 'server did not apply the change' in sent[0]
+    ac.inject_message.assert_not_called()
+
+
 def test_kv_commands_surface_server_message_verbatim():
     """Telegram adds NO capability UI of its own — the structured kv_state ``message``
     from the REST response is relayed as the reply (success AND refusal paths), so the
@@ -1753,6 +1894,30 @@ def test_token_post_body_only_token_would_401():
         assert resp.status_code == 401, 'body-only token must NOT authenticate'
 
     _run(_go())
+
+
+def test_set_effort_is_open_no_token():
+    """set_effort PATCHes the OPEN /api/settings endpoint: no handshake, no token param.
+
+    The negative mirror of test_token_post_body_only_token_would_401 — here the ABSENCE of a
+    token is correct. Proves set_effort is a plain _request, not a _token_post.
+    """
+    mock = _MockACServer()
+    client = _make_client(mock)
+
+    async def _go():
+        await client.open()
+        res = await client.set_effort('high')
+        assert res['applied'] == {'effort_level': 'high'}
+
+    _run(_go())
+    # The open endpoint saw the body verbatim...
+    assert mock.settings_patches == [{'effort_level': 'high'}]
+    # ...and no handshake happened (a token-auth client would have created a session).
+    assert mock.sessions == {}
+    # The request carried no token query param.
+    assert mock.settings_params == [{}]
+    assert 'token' not in mock.settings_params[0]
 
 
 # ---------------------------------------------------------------------------

@@ -315,6 +315,19 @@ class ACClient:
             body['mode'] = mode
         return await self._token_post('/api/afk', body)
 
+    async def set_effort(self, level: str) -> Dict[str, Any]:
+        """PATCH /api/settings (OPEN endpoint) — set the effort notch.
+
+        Sends the bare-delta body {'effort_level': level}; the server applies it through
+        the same pipeline as the Web UI's update_settings (registry-validated). No token:
+        the endpoint takes none (api_server.py:2008). Returns
+        {'revision', 'applied', 'rejected'}; the caller inspects 'applied'/'rejected'.
+        """
+        resp = await self._request('PATCH', '/api/settings', json={'effort_level': level})
+        if resp.status_code != 200:
+            raise ACError(f"/api/settings failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
+
     async def restore_session(self, name: str) -> Dict[str, Any]:
         """POST /api/session/restore (session_token)."""
         return await self._token_post('/api/session/restore', {'name': name})

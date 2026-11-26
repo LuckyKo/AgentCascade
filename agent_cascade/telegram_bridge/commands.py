@@ -250,6 +250,55 @@ async def _cmd_security(ctx: CommandContext) -> str:
     return '🔒 Auto-security ON' if enabled else '🔓 Auto-security OFF'
 
 
+# Reply label map. Format follows web_ui/app.js renderEffortInfo (turn/sub/budgeting),
+# but full words ('Medium') rather than the sidebar's abbreviated 'Med' — readability only,
+# deliberately NOT byte-identical to the sidebar.
+_EFFORT_LABEL = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'ultra': 'Ultra'}
+
+
+def _effort_reply(notch: str, turn_caps: Dict[str, Any], nested_caps: Dict[str, Any]) -> str:
+    """Render 'Effort → High (100 turns · 7 sub · budgeting on)'.
+
+    Budgeting on/off is intrinsic to the notch and matches the Web UI renderer
+    (web_ui/app.js:475 — ultra forces budgeting OFF, else ON). The caps are passed in
+    from the live server snapshot so the reply tracks a settings.py tweak; the caller
+    resolves them (snapshot first, module defaults as fallback).
+    """
+    turn = turn_caps.get(notch)
+    parts = ['no cap' if turn is None else f'{turn} turns']
+    nested = nested_caps.get(notch)
+    if nested is not None:
+        parts.append(f'{nested} sub')
+    parts.append('budgeting off' if notch == 'ultra' else 'budgeting on')
+    return f"✅ Effort → {_EFFORT_LABEL.get(notch, notch)} ({' · '.join(parts)})"
+
+
+async def _cmd_effort(ctx: CommandContext) -> str:
+    parts = ctx.args.split()
+    if not parts:
+        # bare /effort → report current level + caps from the live server snapshot
+        ps = (await ctx.ac.get_state() or {}).get('pool_settings') or {}
+        notch = settings.normalize_effort_level(ps.get('effort_level'))
+        tc = ps.get('effort_turn_caps', dict(settings.EFFORT_TURN_CAPS))
+        nc = ps.get('effort_nested_caps', dict(settings.EFFORT_NESTED_CAPS))
+        return f"ℹ️ {_effort_reply(notch, tc, nc)}"
+    notch = parts[0].strip().lower()
+    if notch not in settings.EFFORT_LEVELS:               # reject gate: exact notch set (not normalize)
+        return 'Usage: /effort low|medium|high|ultra'
+    result = await ctx.ac.set_effort(notch)
+    # applied/rejected are keyed by the REGISTRY KEY 'effort_level', not the notch
+    # (apply_settings_changes returns {key: value}; keying on the notch would always read rejected).
+    applied = (result or {}).get('applied') or {}
+    if 'effort_level' not in applied:
+        rej = ((result or {}).get('rejected') or {}).get('effort_level')
+        return f"⚠️ /effort rejected: {rej or 'server did not apply the change'}"
+    # Same server snapshot is the source of truth for caps; read it once.
+    ps = (await ctx.ac.get_state() or {}).get('pool_settings') or {}
+    tc = ps.get('effort_turn_caps', dict(settings.EFFORT_TURN_CAPS))
+    nc = ps.get('effort_nested_caps', dict(settings.EFFORT_NESTED_CAPS))
+    return _effort_reply(notch, tc, nc)
+
+
 async def _cmd_restore(ctx: CommandContext) -> str:
     name = ctx.args.strip()
     if not name:
@@ -358,6 +407,7 @@ COMMANDS: Dict[str, CommandHandler] = {
         CommandHandler('loadkv', 'Load saved KV state: /loadkv [instance-name]', _cmd_loadkv),
         CommandHandler('snapshot', 'Capture a fleet snapshot: /snapshot [stack-id]', _cmd_snapshot),
         CommandHandler('stack', 'Fleet stacks: /stack list | /stack swap <stack-id>', _cmd_stack),
+        CommandHandler('effort', 'Show/set effort notch: /effort [low|medium|high|ultra]', _cmd_effort),
         CommandHandler('help', 'List all commands (alias: /?)', _cmd_help),
     ]
 }
