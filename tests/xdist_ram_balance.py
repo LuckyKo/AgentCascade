@@ -98,11 +98,13 @@ def resolve_xdist_n(log: bool = True):
     available = psutil.virtual_memory().available
     nproc = psutil.cpu_count(logical=True) or os.cpu_count() or 1
 
-    # 4 GiB/worker is the safe default for THIS suite: each xdist worker re-imports the
-    # heavy tests/conftest.py (module-scope QWenTokenizer + LLM imports, ~several GiB each),
-    # so a 1 GiB budget over-provisions (e.g. 42 GiB / 1 GiB -> 16 workers -> thrash + the
-    # documented BUG_0078 worker-death). 4 GiB keeps the aggregate under available RAM.
-    budget_mb = _env_int('AGENT_CASCADE_XDIST_RAM_BUDGET_MB', 4096)
+    # 2 GiB/worker default (measured, 2026-11-27): per-xdist-worker peak RSS is
+    # ~1.2 GiB under heavy fixture load (agent/stress/session tests; only ~0.2 GiB
+    # for the conftest import alone), so a 2 GiB budget keeps a ~68% safety margin
+    # while letting the scaler reach the full core ceiling (e.g. 42 GiB / 2 GiB
+    # -> 21 -> capped at nproc=16). A 1 GiB budget would over-provision (16+
+    # workers -> thrash + the documented BUG_0078 worker-death).
+    budget_mb = _env_int('AGENT_CASCADE_XDIST_RAM_BUDGET_MB', 2048)
     per_worker_bytes = budget_mb * 1024 * 1024
     floor = _env_int('AGENT_CASCADE_XDIST_FLOOR', 2)
     ceiling = _env_int('AGENT_CASCADE_XDIST_CEILING', None)  # None -> nproc (inside compute_xdist_n)
