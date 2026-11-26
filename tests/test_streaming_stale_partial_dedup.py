@@ -54,6 +54,9 @@ class FakePool:
     def is_instance_halted(self, n):
         return False
 
+    def is_paused(self):
+        return False
+
     def has_messages(self, n):
         return False
 

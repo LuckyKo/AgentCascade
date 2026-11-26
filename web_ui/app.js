@@ -5078,10 +5078,11 @@ function renderSubAgents() {
     // Update tab content safely (preserves handlers on closeBtn)
     const iconSpan = tabBtn.querySelector('.tab-icon-container');
     if (iconSpan) {
-      // Show dot for active agents, pulse only when streaming
+      // Show dot for active agents, pulse only when streaming. A held agent (per-instance halt or
+      // global pause) is parked at a boundary — suppress the pulse so it doesn't fake "generating".
       const isStreaming = agentData?.is_partial ?? false;
       const agentState = (agentData?.agent_state || 'idle').toLowerCase();
-      const shouldShowDot = !['idle', 'terminated'].includes(agentState);
+      const shouldShowDot = !['idle', 'terminated'].includes(agentState) && !(agentData?.is_halted ?? false) && !state.paused;
 
       // Only update icon innerHTML when active state or streaming status actually changes to avoid GPU churn
       const prevActive = tabBtn.dataset.isActive === 'true';
@@ -5667,7 +5668,8 @@ function updateControls() {
           const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
           const isStreaming = agentData?.is_partial ?? false;
           const agentState = (agentData?.agent_state || 'idle').toLowerCase();
-          const shouldShowDot = !['idle', 'terminated'].includes(agentState);
+          // A held agent (per-instance halt or global pause) is parked at a boundary — suppress the pulse.
+          const shouldShowDot = !['idle', 'terminated'].includes(agentState) && !(agentData?.is_halted ?? false) && !state.paused;
           const prevActive = activeTabEl.dataset.isActive === 'true';
           const prevStreaming = activeTabEl.dataset.isStreaming === 'true';
           if (prevActive !== shouldShowDot || (shouldShowDot && prevStreaming !== isStreaming)) {
@@ -5697,7 +5699,8 @@ function updateControls() {
           const icon = agentData?.agent_class === 'orchestrator' ? '💬' : '🤖';
           const isStreaming = agentData?.is_partial ?? false;
           const agentState = (agentData?.agent_state || 'idle').toLowerCase();
-          const shouldShowDot = !['idle', 'terminated'].includes(agentState);
+          // A held agent (per-instance halt or global pause) is parked at a boundary — suppress the pulse.
+          const shouldShowDot = !['idle', 'terminated'].includes(agentState) && !(agentData?.is_halted ?? false) && !state.paused;
           const prevActive = activeTabEl.dataset.isActive === 'true';
           const prevStreaming = activeTabEl.dataset.isStreaming === 'true';
           if (prevActive !== shouldShowDot || (shouldShowDot && prevStreaming !== isStreaming)) {
@@ -5717,6 +5720,17 @@ function updateControls() {
     }
     state._lastIsGenerating = isGenerating;
   }
+  // Held-session signals (computed once, reused for buttons + status line). A globally-paused pool
+  // OR a per-instance halt both hold the active session at a clean boundary, so the session may be
+  // safely reset/refreshed while held. `is_halted` is per-instance only; global pause is a separate
+  // signal (is-instance-halted-is-per-instance-only). Genuine halt is surfaced in the status line.
+  const activeInstance = getActiveInstanceName();
+  const activeAgentData = state.subAgents[activeInstance];
+  const isHalted = !!activeAgentData?.is_halted;
+  const isPaused = !!state.paused;
+  // Check if ANY agent is genuinely halted (per-instance compression/stop, not global pause)
+  const anyHalted = Object.values(state.subAgents).some(a => a?.is_halted);
+
   if (stopBtn) stopBtn.style.opacity = state.generating ? '1' : '0.4';
   sendBtn.disabled = !state.connected;
   const activeMsgs = state.subAgents[getActiveAgentName()]?.messages || [];
@@ -5724,19 +5738,20 @@ function updateControls() {
   const refreshBtn = document.getElementById('refreshBtn');
   const mainRB = document.getElementById('mainRetryBtn');
   const retryDisabled = state.generating || activeMsgs.length === 0;
-  if (refreshBtn) refreshBtn.disabled = state.generating;
+
+  // New Session (`stacks_new`) parks the active stack and force-halts a running fleet's in-flight
+  // turns (snapshot.park_active_stack), so the session buttons unlock only while held AND with no
+  // instance still actively streaming — a held active agent must not free them over a live sibling.
+  const anyAgentActive = Object.values(state.subAgents).some(a => a && a.active);
+  const sessionUnlock = (isHalted || isPaused) && !anyAgentActive;
+
+  if (refreshBtn) refreshBtn.disabled = state.generating && !sessionUnlock;
   if (mainRB) mainRB.disabled = retryDisabled;
 
-  const activeInstance = getActiveInstanceName();
-  const activeAgentData = state.subAgents[activeInstance];
-  const isHalted = !!activeAgentData?.is_halted;
-
-  // Check if ANY agent is genuinely halted (per-instance compression/stop, not global pause)
-  const anyHalted = Object.values(state.subAgents).some(a => a?.is_halted);
-
-  // Global tool-boundary hold — distinct from per-instance halt. The pause/resume button
-  // reflects this; genuine halt is surfaced in the status line instead.
-  const isPaused = !!state.paused;
+  // New Session (resetBtn) is enable/disable-locked inside the `_lastIsGenerating` guard above,
+  // which only fires when `generating` CHANGES. Override it here so a halt/pause toggle alone —
+  // which never flips `generating` (pause_fix) — still refreshes it.
+  resetBtn.disabled = state.generating && !sessionUnlock;
 
   // Show genuine halt first, then global pause, else generation — prevents misleading "Generating..." when stuck
   statusText.textContent = anyHalted ? '⏸ Halted' : (isPaused ? '⏸ Paused' : (state.generating ? 'Generating...' : ''));

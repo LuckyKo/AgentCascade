@@ -570,7 +570,10 @@ def build_instance_status_from_pool(pool) -> Optional[Dict[str, Dict[str, Any]]]
     client can recover without paying for a full state build (which serializes history).
 
     Field semantics mirror ``_serialize_instance`` exactly: ``active`` is
-    ``state == AgentState.RUNNING`` (the value the frontend already treats as "streaming").
+    ``state == AgentState.RUNNING`` AND the agent is not HELD — either a per-instance halt
+    (``is_halted``) or a global pool pause means the agent is parked at a clean boundary and is
+    NOT actively streaming (``is_halted`` is per-instance only; global pause is a separate signal,
+    see ``is-instance-halted-is-per-instance-only``).
 
     Returns ``None`` when the snapshot is UNRELIABLE — the pool/instances can't be read,
     or any single instance's state read throws. The caller must then OMIT the ``instances``
@@ -583,6 +586,8 @@ def build_instance_status_from_pool(pool) -> Optional[Dict[str, Dict[str, Any]]]
     instances = getattr(pool, 'instances', None) if pool is not None else None
     if not isinstance(instances, dict):
         return None
+    # Global pause is pool-wide; read it once (a paused agent is held at a boundary, not streaming).
+    paused = bool(pool.is_paused())
     for name, inst in list(instances.items()):
         try:
             lock = getattr(inst, '_state_lock', None)
@@ -591,10 +596,11 @@ def build_instance_status_from_pool(pool) -> Optional[Dict[str, Dict[str, Any]]]
                     current_state = inst.state
             else:
                 current_state = inst.state
+            halted = bool(pool.is_instance_halted(name))
             status[name] = {
-                'active': current_state == AgentState.RUNNING,
+                'active': (current_state == AgentState.RUNNING) and not (halted or paused),
                 'agent_state': current_state.name,
-                'is_halted': bool(pool.is_instance_halted(name)),
+                'is_halted': halted,
             }
         except Exception as e:
             logger.debug(f"Idle-status snapshot unreliable (instance {name!r}): {e}")
@@ -1220,13 +1226,20 @@ def _serialize_instance(
     with inst._state_lock:
         current_state = inst.state  # Snapshot under lock
 
+    # A HELD agent is not actively streaming: a per-instance halt (is_instance_halted) OR a
+    # global pool pause both mean "parked at a clean boundary". `active` drives the frontend's
+    # per-agent panel indicator, so both must drop it. `is_halted` itself stays strictly
+    # per-instance — global pause is a separate signal (is-instance-halted-is-per-instance-only).
+    is_halted = pool.is_instance_halted(inst.instance_name)
+    is_paused = bool(pool.is_paused())
+
     result = {
         'instance_name': inst.instance_name,
         'agent_class': inst.agent_class,
-        'active': current_state == AgentState.RUNNING,  # Maps to frontend's agentData.active (derived from state)
+        'active': (current_state == AgentState.RUNNING) and not (is_halted or is_paused),  # Maps to frontend's agentData.active (derived from state, halt/pause-aware)
         'agent_state':
             current_state.name,  # Send actual state name for activity indicator (RUNNING, SLEEPING, IDLE, etc.)
-        'is_halted': pool.is_instance_halted(inst.instance_name),
+        'is_halted': is_halted,
         'parent_instance': inst.parent_instance,
         'has_queued_messages': pool.has_messages(inst.instance_name),
         'queued_messages': pool.get_queue_messages(inst.instance_name) if pool else [],

@@ -196,3 +196,25 @@ test('a status frame with generating:true never raises an idle client flag', () 
   assert.equal(calls.updateGenStats, 0, 'turn-end bookkeeping ran on a non-heal frame');
   assert.equal(state.subAgents.root.active, true, 'per-instance active flag was not applied');
 });
+
+// ── Test 7: halt-aware `active:false` must NOT fake-heal a held (still-generating) run ──────
+// pause_fix safety property. The server now reports `active:false` for a held-but-RUNNING agent
+// (halt or global pause), so the tab pulse/indicator stop faking "generating". But the GLOBAL
+// `state.generating` flag may only be lowered when the server says generating:false — a held run
+// is NOT finished, and clearing the flag would strip streamed content / unlock mid-turn input.
+test('a halt-aware status frame (active:false, RUNNING+halted) with generating:true does not heal', () => {
+  const { state, warnings, apply } = buildSandbox({ subAgents: { root: activeRoot() } });
+  assert.equal(state.generating, true, 'precondition: UI thinks it is generating');
+
+  // Server: session still generating, but the held instance now reports active:false + is_halted:true.
+  apply({ type: 'status', generating: true, instances: {
+    root: { active: false, agent_state: 'RUNNING', is_halted: true },
+  } });
+
+  assert.equal(state.generating, true,
+    'generating flag must NOT be lowered on a generating:true frame, even when active:false is halt-aware');
+  assert.ok(!warnings.some(w => w.includes('clearing stale flag')), 'no heal on a generating:true frame');
+  // The halt-aware flags ARE still applied to the instance (that is what kills the fake pulse).
+  assert.equal(state.subAgents.root.active, false, 'halt-aware active flag was not applied to the instance');
+  assert.equal(state.subAgents.root.is_halted, true, 'is_halted flag was not applied');
+});

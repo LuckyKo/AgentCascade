@@ -368,6 +368,7 @@ def _mk_pool(inst):
     pool.is_instance_halted = lambda name: False
     pool.has_messages = lambda name: False
     pool.get_queue_messages = lambda name: []
+    pool.is_paused = lambda: False
     return pool
 
 
@@ -406,6 +407,38 @@ class TestKvStateCapableField:
             out = state_builder._serialize_instance(inst, pool)
             assert 'kv_state_capable' in out
             assert out['kv_state_capable'] is expected
+
+
+class TestSerializeInstanceActive:
+    """``_serialize_instance.active`` must drop for a HELD (halted or globally-paused) RUNNING
+    agent so the frontend's per-agent panel indicator stops faking "generating". ``is_halted``
+    stays strictly per-instance; global pause is a separate signal."""
+
+    def test_active_false_when_halted_or_paused(self):
+        from agent_cascade.agent_instance import AgentState
+        from agent_cascade.api_integration_pkg import state_builder
+
+        # Baseline: RUNNING, not halted, not paused → active True, is_halted False.
+        inst = _mk_inst(None)
+        inst.state = AgentState.RUNNING
+        out = state_builder._serialize_instance(inst, _mk_pool(inst))
+        assert out['active'] is True and out['is_halted'] is False
+
+        # Per-instance halt: active drops, is_halted True.
+        inst2 = _mk_inst(None)
+        inst2.state = AgentState.RUNNING
+        pool2 = _mk_pool(inst2)
+        pool2.is_instance_halted = lambda name: True
+        out2 = state_builder._serialize_instance(inst2, pool2)
+        assert out2['active'] is False and out2['is_halted'] is True
+
+        # Global pause (not halted): active drops, but is_halted stays False.
+        inst3 = _mk_inst(None)
+        inst3.state = AgentState.RUNNING
+        pool3 = _mk_pool(inst3)
+        pool3.is_paused = lambda: True
+        out3 = state_builder._serialize_instance(inst3, pool3)
+        assert out3['active'] is False and out3['is_halted'] is False
 
 
 def test_serialize_message_bare_number_content_stringifies():

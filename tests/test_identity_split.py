@@ -229,6 +229,7 @@ class TestStateBuilderDisplay:
         fake_pool = SimpleNamespace(
             instances=snapshot,
             is_instance_halted=lambda name: False,
+            is_paused=lambda: False,
             has_messages=lambda name: False,
             get_queue_messages=lambda name: [],
         )

@@ -58,12 +58,16 @@ class _Lock:
 class _StatusPool:
     """Pool stub for build_instance_status_from_pool only."""
 
-    def __init__(self, instances=None, halted=()):
+    def __init__(self, instances=None, halted=(), paused=False):
         self.instances = dict(instances or {})
         self._halted = set(halted)
+        self._paused = paused
 
     def is_instance_halted(self, name):
         return name in self._halted
+
+    def is_paused(self):
+        return self._paused
 
 
 class _AppPool:
@@ -132,6 +136,25 @@ class TestInstanceStatusSnapshot:
         assert status['sleeper'] == {'active': False, 'agent_state': 'SLEEPING', 'is_halted': False}
         # The state snapshot must be taken under the instance's state lock.
         assert lock.entries == 1
+
+    def test_running_halted_or_paused_is_inactive(self):
+        # A RUNNING agent that is per-instance HALTED, or one in a globally PAUSED pool, is
+        # parked at a clean boundary and must report ``active`` False (else the frontend keeps
+        # faking "generating" / pulsing it). ``is_halted`` stays strictly per-instance.
+        pool = _StatusPool(
+            {'run': _Inst(AgentState.RUNNING), 'hal': _Inst(AgentState.RUNNING)},
+            halted={'hal'},
+        )
+        status = build_instance_status_from_pool(pool)
+        assert status['run'] == {'active': True, 'agent_state': 'RUNNING', 'is_halted': False}
+        assert status['hal'] == {'active': False, 'agent_state': 'RUNNING', 'is_halted': True}
+
+        # Global pause: a not-halted RUNNING instance is inactive, yet ``is_halted`` stays False
+        # (halt and pause are independent signals — is-instance-halted-is-per-instance-only).
+        paused_pool = _StatusPool({'run': _Inst(AgentState.RUNNING)}, paused=True)
+        assert build_instance_status_from_pool(paused_pool)['run'] == {
+            'active': False, 'agent_state': 'RUNNING', 'is_halted': False,
+        }
 
     def test_unreadable_pool_is_none_valid_empty_pool_is_empty_dict(self):
         # A pool whose instances can't be read at all is UNRELIABLE → None, so the caller
