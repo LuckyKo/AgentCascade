@@ -163,6 +163,7 @@ class WsMessageHandler:
             start_gen_fn: Callable,  # Thread entry point for run_agent_thread
             session_lock: threading.Lock,
             app,  # FastAPI app object (holds security_check_semaphore, current_auto_security)
+            client_id: str = '',  # Short per-connection id for attributing high-level commands in logs
     ):
         self.session = session
         self.agent_pool = agent_pool
@@ -173,6 +174,17 @@ class WsMessageHandler:
         self._start_gen_fn = start_gen_fn
         self._session_lock = session_lock
         self.app = app  # Fix 1: store app reference for security handler wiring
+        self.client_id = client_id
+
+    # ── High-level command logging ────────────────────────────────────────
+    # High-impact lifecycle/control commands; dispatch logs these with the
+    # originating client id so "who triggered this?" is answerable from server logs.
+    _HIGH_LEVEL_WS_COMMANDS: ClassVar[set] = {
+        MsgType.RESTART_SERVER, MsgType.STOP, MsgType.PAUSE, MsgType.RESUME,
+        MsgType.RESUME_ALL, MsgType.TERMINATE_AGENT_INSTANCE, MsgType.TERMINATE_SUB_AGENT,
+        MsgType.TERMINATE_TOOLS, MsgType.RESET, MsgType.REFRESH_AGENTS, MsgType.REFRESH_SOULS,
+        MsgType.INJECT, MsgType.STACKS_SWAP, MsgType.STACKS_NEW, MsgType.STACKS_DELETE,
+    }
 
     # ── Dispatch table ────────────────────────────────────────────────────
     @property
@@ -230,6 +242,9 @@ class WsMessageHandler:
         msg_type = data.get(WsEnvelope.TYPE, '')
         handler = self._dispatch_table.get(msg_type)
         if handler is not None:
+            if msg_type in self._HIGH_LEVEL_WS_COMMANDS:
+                from agent_cascade.log import logger
+                logger.info('[WS] high-level command %r from client %s', msg_type, getattr(self, 'client_id', ''))
             await handler(data)
         else:
             # Fallback for unknown types — log and silently ignore
@@ -1403,7 +1418,7 @@ class WsMessageHandler:
         """Handle 'restart_server' — restart the server process."""
         from agent_cascade.log import logger
         from agent_cascade.server_restart import restart_server_process
-        logger.warning('Server restart requested via UI')
+        logger.warning('Server restart requested via UI (client=%s)', getattr(self, 'client_id', ''))
         await self.broadcast_fn({WsEnvelope.TYPE: MsgType.ERROR, WsEnvelope.MESSAGE: 'Server is restarting... Please wait.'})
         if settings.ENABLE_STACK_SWAP and settings.SNAPSHOT_AUTOSAVE_ENABLED and self.agent_pool:
             try:

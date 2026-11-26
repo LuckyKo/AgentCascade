@@ -36,6 +36,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -2813,6 +2814,14 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     @app.websocket('/ws/chat')
     async def ws_chat(websocket: WebSocket):
         await websocket.accept()
+
+        # Assign a short id so command logs can attribute actions to a specific client.
+        # Starlette's websocket.client is a (host, port) tuple, or None when unavailable.
+        client_id = uuid.uuid4().hex[:8]
+        websocket._ac_ws_client_id = client_id
+        peer = f'{websocket.client[0]}:{websocket.client[1]}' if websocket.client else 'unknown'
+        logger.info('[WS] client connected: id=%s from=%s', client_id, peer)
+
         ws_connections.add(websocket)
 
         # Send initial state
@@ -2843,6 +2852,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
                     session=session, agent_pool=agent_pool, agents=agents, send_queue=_get_send_queue(),
                     broadcast_fn=broadcast, build_state_fn=build_state, start_gen_fn=start_gen,
                     session_lock=session_lock, app=app,
+                    client_id=websocket._ac_ws_client_id,
                 )
                 await handler.dispatch(data)
 
@@ -2853,6 +2863,7 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             traceback.print_exc()
         finally:
             ws_connections.discard(websocket)
+            logger.info('[WS] client disconnected: id=%s', client_id)
 
     # ── Serve frontend static files ───────────────────────────────────────
     # api_server.py is inside agent_cascade/, but web_ui/ is at the project root — go one level up
