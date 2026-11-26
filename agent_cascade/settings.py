@@ -552,6 +552,16 @@ HOLDER_DMS_MAX_BOUND_S: float = float(os.getenv('AGENT_CASCADE_HOLDER_DMS_MAX_BO
 # time, the holder-DMS shield (dms_bound scales with batch size) and (for vision agents)
 # context growth from N images in one tool result. 0 = off (uncapped). Env-only knob (no UI).
 MEDIA_GEN_MAX_BATCH: int = int(os.getenv('AGENT_CASCADE_MEDIA_GEN_MAX_BATCH', 8))
+# ── Log/telemetry retention (bounds unbounded logs + telemetry jsonl growth) ──
+# Days of top-level <workspace>/logs/*.jsonl (agent sessions) and
+# <workspace>/telemetry/*.jsonl (telemetry_*) to keep before the retention scheduler
+# gzips them into each root's archive/ subdir (LOG_RETENTION_ARCHIVE) or deletes them.
+# 0 = off (no sweep runs, scheduler is not started). Env-only knob (no UI).
+LOG_RETENTION_DAYS: int = int(os.getenv('AGENT_CASCADE_LOG_RETENTION_DAYS', 30))
+# How often the retention sweep runs, in hours. Only used when LOG_RETENTION_DAYS > 0.
+LOG_RETENTION_INTERVAL_HOURS: int = int(os.getenv('AGENT_CASCADE_LOG_RETENTION_INTERVAL_HOURS', 6))
+# True (default): gzip stale logs into each root's archive/<name>.jsonl.gz. False: delete them outright.
+LOG_RETENTION_ARCHIVE: bool = os.getenv('AGENT_CASCADE_LOG_RETENTION_ARCHIVE', '1').strip().lower() not in ('0', 'false', 'off', 'no')
 AGENT_MAX_AUTO_ROLLBACKS: int = int(os.getenv('AGENT_CASCADE_MAX_AUTO_ROLLBACKS', 5))  # Max loop recovery retries
 # ── Two-tier loop detection ──
 # Tier 1 — exact matcher (exact_loop_detect.py). Rollback still respects auto_rollback_on_loop / max_auto_rollbacks.

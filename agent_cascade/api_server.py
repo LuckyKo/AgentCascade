@@ -3057,6 +3057,17 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     except Exception as e:
         logger.warning(f"Media cleanup scheduler failed to start (non-critical): {e}")
 
+    # Start log retention scheduler (non-critical; disabled when LOG_RETENTION_DAYS <= 0)
+    from agent_cascade.settings import LOG_RETENTION_ARCHIVE, LOG_RETENTION_DAYS, LOG_RETENTION_INTERVAL_HOURS
+    from agent_cascade.utils.log_retention import start_log_retention_scheduler
+    if LOG_RETENTION_DAYS > 0:
+        try:
+            start_log_retention_scheduler(retention_days=LOG_RETENTION_DAYS,
+                                          interval_hours=LOG_RETENTION_INTERVAL_HOURS,
+                                          archive=LOG_RETENTION_ARCHIVE)
+        except Exception as e:
+            logger.warning(f"Log retention scheduler failed to start (non-critical): {e}")
+
     return app
 
 
