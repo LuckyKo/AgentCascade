@@ -1256,6 +1256,19 @@ SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FL
 #   NOTE: any weight > 0.0 turns on BOTH the value re-rank AND the bounded θ_min admission
 #   bar (which arms the fire-rate controller) — a small weight is NOT a "rank-only" mode;
 #   the bar still seeds at 0.0 (admit-all) and only drifts once the controller sees turns.
+#
+#   BUG_0417 — optimal value: there is NO universal optimum to hardcode. The weight is
+#   workload/data-dependent: the re-rank only adds value once the per-skill ledger has
+#   signal (p̄ ≠ 0); on a cold ledger p̄=0 ⇒ _value_rank returns raw order, so any W>0
+#   arms the fire-rate controller for zero value signal (pure churn). The bandit test
+#   harness is mechanics-only (determinized sampler; no recall/precision sweep over W),
+#   so no empirical optimum is derivable. RESOLUTION (Option A): keep the default OFF
+#   (0.0) to preserve deploy-time byte-identity — a non-zero default would REPLACE the
+#   ACTIVE Gate-4 precision-demote branch (SKILL_PRECISION_WEIGHT defaults ON).
+#   Recommended OPT-IN: set AGENT_CASCADE_SKILL_BANDIT_WEIGHT=0.5 as a starting point,
+#   enable it only once the ledger has real usage signal, ramp toward 1.0 on measured
+#   conversion gain, and roll back by clearing the env var. Evidence:
+#   reports/BUG_0417_skill_bandit_weight_findings.md.
 SKILL_BANDIT_WEIGHT: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_WEIGHT', '0.0'))
 # SKILL_BANDIT_PRIOR_MASS: prior mass m₀ of the base-rate-centred informed prior
 #   Beta(m₀·p̄ + s, m₀·(1−p̄) + f). Small m₀ = aggressive dormancy exploration; large =
