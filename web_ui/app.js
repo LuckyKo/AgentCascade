@@ -456,23 +456,23 @@ function syncPoolSettings(ps) {
 const EFFORT_DEFAULT_TURN_CAPS = { low: 30, medium: 50, high: 100, ultra: null };
 const EFFORT_DEFAULT_NESTED_CAPS = { low: 1, medium: 3, high: 7, ultra: null };
 
-/** Fill #effort-slider-info with one line per notch, read from the pool-settings
- *  snapshot (effort_turn_caps / effort_nested_caps; fall back to defaults if absent).
- *  Budgeting on/off is intrinsic to the notch: ultra honors Enable Agent Budgeting;
- *  low/med/high force budgeting off. Whitespace-free text joined with \n (pre-line CSS). */
+/** Fill #effort-slider-info with the description of the CURRENTLY-SELECTED notch only,
+ *  read from the pool-settings snapshot (effort_turn_caps / effort_nested_caps; fall back
+ *  to defaults if absent). Budgeting on/off is intrinsic to the notch: ultra forces it
+ *  off (always max turns); low/med/high honor the Enable Agent Budgeting toggle. */
 function renderEffortInfo(ps) {
   const el = $('#effort-slider-info');
   if (!el) return;
+  const sel = $('#effort-slider');
+  const lvl = (sel && sel.value) || 'ultra';
   const tc = (ps && ps.effort_turn_caps) || EFFORT_DEFAULT_TURN_CAPS;
   const nc = (ps && ps.effort_nested_caps) || EFFORT_DEFAULT_NESTED_CAPS;
-  el.textContent = [['low', 'Low'], ['medium', 'Med'], ['high', 'High'], ['ultra', 'Ultra']]
-    .map(([lvl, label]) => {
-      const turn = tc[lvl] == null ? 'no cap' : `${tc[lvl]} turns`;
-      const parts = [turn];
-      if (nc[lvl] != null) parts.push(`${nc[lvl]} sub`);
-      parts.push(`budgeting ${lvl === 'ultra' ? 'off' : 'on'}`);
-      return `${label}: ${parts.join(' · ')}`;
-    }).join('\n');
+  const label = { low: 'Low', medium: 'Med', high: 'High', ultra: 'Ultra' }[lvl] || 'Ultra';
+  const turn = tc[lvl] == null ? 'no cap' : `${tc[lvl]} turns`;
+  const parts = [turn];
+  if (nc[lvl] != null) parts.push(`${nc[lvl]} sub`);
+  parts.push(`budgeting ${lvl === 'ultra' ? 'off' : 'on'}`);
+  el.textContent = `${label}: ${parts.join(' · ')}`;
 }
 
 // ── Backend-authoritative settings (Batch B, Phase 2) ──────────────────────────
@@ -7119,6 +7119,7 @@ if ($('#restart-server-btn')) {
 if ($('#effort-slider')) {
   $('#effort-slider').addEventListener('change', (e) => {
     queueSettingChange('effort_level', e.target.value);
+    renderEffortInfo(state.pool_settings);   // update the sidebar info to the new notch
   });
 }
 

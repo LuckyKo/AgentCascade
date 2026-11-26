@@ -85,7 +85,7 @@ function buildSandbox(dom) {
   return ctx;
 }
 
-test('renderEffortInfo fills #effort-slider-info from the snapshot (one row per notch)', () => {
+test('renderEffortInfo shows only the selected notch (from the snapshot)', () => {
   const dom = makeDom();
   const ctx = buildSandbox(dom);
   // Sentinel values deliberately DIFFERENT from the built-in defaults (30/50/100 and
@@ -95,28 +95,24 @@ test('renderEffortInfo fills #effort-slider-info from the snapshot (one row per 
     effort_nested_caps: { low: 2, medium: 5, high: 9, ultra: null },
   };
   ctx.snapshot = snapshot;
+  dom.$('#effort-slider').value = 'low';
   vm.runInContext('renderEffortInfo(snapshot)', ctx);
-
-  const text = dom.elements['#effort-slider-info'].textContent;
-  assert.ok(text.includes('Low: 7 turns · 2 sub · budgeting on'), `low row wrong: ${text}`);
-  assert.ok(text.includes('Med: 80 turns · 5 sub · budgeting on'), `med row wrong: ${text}`);
-  assert.ok(text.includes('High: 200 turns · 9 sub · budgeting on'), `high row wrong: ${text}`);
-  assert.ok(text.includes('Ultra: no cap · budgeting off'), `ultra row wrong: ${text}`);
-  assert.equal(text.split('\n').length, 4, 'must render exactly 4 notch rows');
+  assert.equal(dom.elements['#effort-slider-info'].textContent, 'Low: 7 turns · 2 sub · budgeting on');
+  // switching the selection re-renders a single line for the new notch
+  dom.$('#effort-slider').value = 'ultra';
+  vm.runInContext('renderEffortInfo(snapshot)', ctx);
+  assert.equal(dom.elements['#effort-slider-info'].textContent, 'Ultra: no cap · budgeting off');
 });
 
 test('renderEffortInfo falls back to built-in defaults when the keys are absent', () => {
   const dom = makeDom();
   const ctx = buildSandbox(dom);
   ctx.snapshot = {};   // snapshot predates the effort_* keys
+  dom.$('#effort-slider').value = 'high';
   vm.runInContext('renderEffortInfo(snapshot)', ctx);
 
-  const text = dom.elements['#effort-slider-info'].textContent;
-  // Fallback nested caps are the real settings.py values (low1/med3/high7).
-  assert.ok(text.includes('Low: 30 turns · 1 sub · budgeting on'), `low row wrong: ${text}`);
-  assert.ok(text.includes('Med: 50 turns · 3 sub · budgeting on'), `med row wrong: ${text}`);
-  assert.ok(text.includes('High: 100 turns · 7 sub · budgeting on'), `high row wrong: ${text}`);
-  assert.ok(text.includes('Ultra: no cap · budgeting off'), `ultra row wrong: ${text}`);
+  // Fallback nested caps are the real settings.py values (low1/med3/high7); single selected notch.
+  assert.equal(dom.elements['#effort-slider-info'].textContent, 'High: 100 turns · 7 sub · budgeting on');
 });
 
 test('renderEffortInfo is a no-op when the info element is absent (no crash)', () => {
