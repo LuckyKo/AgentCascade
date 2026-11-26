@@ -308,6 +308,16 @@ body {
   outline: none;
 }
 
+/* Visible per-notch effort description under the select (one row per notch, rendered
+   from a newline-joined string — hence pre-line). Mirrors the muted sidebar-label look. */
+.effort-info {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-muted, #8a8f98);
+  margin-top: 4px;
+  white-space: pre-line;
+}
+
 /* ─── Step 11: Agent-Specific Visual Identity via CSS Custom Properties ───────────────────── */
 /* Subtle accent colors per agent type — applied via [data-instance-name] attribute on message elements */
 [data-instance-name="coder"] .msg-header { border-bottom-color: #58a6ff; }

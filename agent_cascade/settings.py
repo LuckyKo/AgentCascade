@@ -72,7 +72,7 @@ EFFORT_TURN_CAPS: Dict[str, Optional[int]] = {
 # Per-notch nested sub-agent depth ceiling (depth of the child; 1 = direct child of the
 # root). None (ultra) = defer to pool.settings.max_nesting_depth (the server hard ceiling).
 EFFORT_NESTED_CAPS: Dict[str, Optional[int]] = {
-    'low': 1, 'medium': 2, 'high': 3, 'ultra': None,
+    'low': 1, 'medium': 3, 'high': 7, 'ultra': None,
 }
 
 

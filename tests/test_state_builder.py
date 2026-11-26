@@ -549,3 +549,32 @@ def test_stream_update_generating_true_for_idle_frame_while_root_running():
         'a frame built for an IDLE sub-agent while the root is RUNNING must report '
         'generating=True (session-level), else the client unlatches mid-turn on spawn'
     )
+
+
+def test_pool_settings_snapshot_includes_effort_caps():
+    """build_pool_settings_snapshot surfaces effort_turn_caps / effort_nested_caps so the
+    sidebar can render a per-notch description. Values come from settings.py (the single
+    source of truth) and stay JSON-serializable (WS broadcast / settings endpoint)."""
+    import json
+    from agent_cascade import settings
+    from agent_cascade.agent_instance import PoolSettings
+    from agent_cascade.api_integration_pkg.state_builder import build_pool_settings_snapshot
+
+    class _StubPool:
+        """Minimal pool surface build_pool_settings_snapshot needs (no om / disabled_tools)."""
+        settings = PoolSettings()
+        llm_cfg = {}
+
+    snap = build_pool_settings_snapshot(_StubPool())
+
+    assert 'effort_turn_caps' in snap, 'effort_turn_caps missing from pool_settings snapshot'
+    assert 'effort_nested_caps' in snap, 'effort_nested_caps missing from pool_settings snapshot'
+    # Mirrors the settings.py constants exactly (low/med/high capped, ultra None).
+    assert snap['effort_turn_caps'] == dict(settings.EFFORT_TURN_CAPS)
+    assert snap['effort_nested_caps'] == dict(settings.EFFORT_NESTED_CAPS)
+    # Pin the concrete defaults so a silent cap change is caught.
+    assert snap['effort_turn_caps'] == {'low': 30, 'medium': 50, 'high': 100, 'ultra': None}
+    assert snap['effort_nested_caps'] == {'low': 1, 'medium': 3, 'high': 7, 'ultra': None}
+    # Survives the JSON round-trip the broadcast endpoint performs.
+    for key in ('effort_turn_caps', 'effort_nested_caps'):
+        assert json.loads(json.dumps(snap[key])) == snap[key], f'{key} not JSON-safe'

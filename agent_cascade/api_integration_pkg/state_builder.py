@@ -34,7 +34,8 @@ def _msg_fingerprint(msg: Any) -> Optional[tuple]:
     return (role, c)
 
 
-from agent_cascade.settings import STREAM_DELTA_ENABLED, STREAM_DELTA_TAIL_COMMITTED
+from agent_cascade.settings import (STREAM_DELTA_ENABLED, STREAM_DELTA_TAIL_COMMITTED,
+                                    EFFORT_TURN_CAPS, EFFORT_NESTED_CAPS)
 
 # Delta-streaming flags live in agent_cascade.settings (default ON, overridable via
 # AGENT_CASCADE_STREAM_DELTA). TAIL_COMMITTED is kept as the internal name used below.
@@ -451,6 +452,12 @@ def build_pool_settings_snapshot(pool: Any) -> Dict[str, Any]:
         pool_settings['work_access_folders_ro'] = [str(p) for p in getattr(om, 'extra_work_folders_ro', [])]
         pool_settings['work_access_folders_rw'] = [str(p) for p in getattr(om, 'extra_work_folders_rw', [])]
         pool_settings['default_workspace'] = str(om.base_dir)
+
+    # Effort per-notch caps (module constants, the single source of truth) — surfaced so the
+    # sidebar can render a visible per-mode description under the Effort select. Plain int/None
+    # values, so _json_safe below passes them through unchanged.
+    pool_settings['effort_turn_caps'] = dict(EFFORT_TURN_CAPS)
+    pool_settings['effort_nested_caps'] = dict(EFFORT_NESTED_CAPS)
 
     # Normalize any non-JSON containers (e.g. a set-valued llm_cfg key) at the boundary
     # so the snapshot is always JSON-serializable for the settings endpoint / WS broadcast.

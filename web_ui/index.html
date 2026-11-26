@@ -90,12 +90,13 @@
             <div class="sidebar-effort">
               <label class="sidebar-label" for="effort-slider">Effort</label>
               <select id="effort-slider" class="effort-select" autocomplete="off"
-                      title="Effort bounds per-call turns + nested sub-agents + budgeting. low=30 turns/1 sub-agent · medium=50/2 · high=100/3 · ultra=no cap">
+                      title="Effort bounds per-call turns + nested sub-agents + budgeting. low=30 turns/1 sub-agent · medium=50/3 · high=100/7 · ultra=no cap">
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
                 <option value="ultra" selected>Ultra</option>
               </select>
+              <div id="effort-slider-info" class="effort-info"></div>
             </div>
           </div>
 
