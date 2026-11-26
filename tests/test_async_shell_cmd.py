@@ -1269,9 +1269,17 @@ class TestRealExecution:
         else:
             time.sleep(1.0)
             task = tracker._get_task('test_agent', tool_id)
-            with task._lock:
-                assert task.completed is True
-                assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
+            if task is not None:
+                with task._lock:
+                    assert task.completed is True
+                    assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
+            else:
+                # Task already reaped from _tasks under xdist load: the exit code is preserved
+                # in the bounded completed-run store (BUG_0061). Guard the None/teardown case
+                # (BUG_0422) so the test no longer assumes the task is still registered.
+                record = tracker._get_completed_run('test_agent', tool_id)
+                assert record is not None, 'task reaped but no completed-run record'
+                assert record['return_code'] == 0, f"Expected exit code 0, got {record['return_code']}"
 
     def test_real_command_nonzero_exit(self):
         """A command that exits non-zero has its exit code recorded."""
@@ -1301,9 +1309,17 @@ class TestRealExecution:
         else:
             time.sleep(1.0)
             task = tracker._get_task('test_agent', tool_id)
-            with task._lock:
-                assert task.completed is True
-                assert task.return_code == 7, f"Expected exit code 7, got {task.return_code}"
+            if task is not None:
+                with task._lock:
+                    assert task.completed is True
+                    assert task.return_code == 7, f"Expected exit code 7, got {task.return_code}"
+            else:
+                # Task already reaped from _tasks under xdist load: the exit code is preserved
+                # in the bounded completed-run store (BUG_0061). Guard the None/teardown case
+                # (BUG_0422) so the test no longer assumes the task is still registered.
+                record = tracker._get_completed_run('test_agent', tool_id)
+                assert record is not None, 'task reaped but no completed-run record'
+                assert record['return_code'] == 7, f"Expected exit code 7, got {record['return_code']}"
 
 
 
