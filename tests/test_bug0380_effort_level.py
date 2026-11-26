@@ -68,8 +68,8 @@ def test_effective_turn_cap_table():
 
 
 @pytest.mark.parametrize('level,expected', [
-    ('low', True), ('medium', True), ('high', True),
-    ('ultra', False), ('bogus', False),  # unknown -> ultra -> not forced off
+    ('low', False), ('medium', False), ('high', False),  # honor the budgeting toggle
+    ('ultra', True), ('bogus', True),  # ultra (and unknown->ultra) force budgeting off
 ])
 def test_effort_budgeting_forced_off(level, expected):
     assert effort_budgeting_forced_off(level) is expected

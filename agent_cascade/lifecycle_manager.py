@@ -898,10 +898,10 @@ class AgentLifecycleManager:
             # overrides via call_agent args.
             # Otherwise, all agents use the caller's max_turns limit regardless
             # of call_agent args.
-            # Effort gate: low/med/high force budgeting OFF at READ time (the notch is
-            # the cost control) so the explicit per-call overrides below are ignored —
-            # without overwriting the stored toggle, so switching back to 'ultra'
-            # restores the user's choice verbatim. 'ultra' honors the stored value.
+            # Effort gate: 'ultra' forces budgeting OFF at READ time (the all-out notch
+            # always uses max turns, no per-call token budget) — without overwriting the
+            # stored toggle, so switching to a lower notch restores it verbatim.
+            # low/med/high honor the user's Enable Agent Budgeting toggle.
             _effort = getattr(getattr(self.pool, 'settings', None), 'effort_level', EFFORT_LEVEL_DEFAULT)
             if effort_budgeting_forced_off(_effort):
                 enable_agent_budgeting = False

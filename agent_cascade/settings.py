@@ -77,9 +77,10 @@ EFFORT_NESTED_CAPS: Dict[str, Optional[int]] = {
 
 
 def effort_budgeting_forced_off(level: str) -> bool:
-    """True for low/med/high: the notch is the cost control, so per-call budgeting
-    overrides are ignored. False for ultra: the user's Enable Agent Budgeting is honored."""
-    return normalize_effort_level(level) != 'ultra'
+    """True for ultra: budgeting is forced off so the run always uses max turns (no
+    per-call token budget). False for low/med/high: the user's Enable Agent Budgeting
+    toggle is honored. 'ultra' is the all-out notch, so it never lets a budget cap it."""
+    return normalize_effort_level(level) == 'ultra'
 
 
 def effective_turn_cap(requested_or_none: Optional[int], effort_level: str) -> int:

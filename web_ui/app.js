@@ -470,7 +470,7 @@ function renderEffortInfo(ps) {
       const turn = tc[lvl] == null ? 'no cap' : `${tc[lvl]} turns`;
       const parts = [turn];
       if (nc[lvl] != null) parts.push(`${nc[lvl]} sub`);
-      parts.push(`budgeting ${lvl === 'ultra' ? 'on' : 'off'}`);
+      parts.push(`budgeting ${lvl === 'ultra' ? 'off' : 'on'}`);
       return `${label}: ${parts.join(' · ')}`;
     }).join('\n');
 }

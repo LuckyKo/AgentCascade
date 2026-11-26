@@ -98,10 +98,10 @@ test('renderEffortInfo fills #effort-slider-info from the snapshot (one row per 
   vm.runInContext('renderEffortInfo(snapshot)', ctx);
 
   const text = dom.elements['#effort-slider-info'].textContent;
-  assert.ok(text.includes('Low: 7 turns · 2 sub · budgeting off'), `low row wrong: ${text}`);
-  assert.ok(text.includes('Med: 80 turns · 5 sub · budgeting off'), `med row wrong: ${text}`);
-  assert.ok(text.includes('High: 200 turns · 9 sub · budgeting off'), `high row wrong: ${text}`);
-  assert.ok(text.includes('Ultra: no cap · budgeting on'), `ultra row wrong: ${text}`);
+  assert.ok(text.includes('Low: 7 turns · 2 sub · budgeting on'), `low row wrong: ${text}`);
+  assert.ok(text.includes('Med: 80 turns · 5 sub · budgeting on'), `med row wrong: ${text}`);
+  assert.ok(text.includes('High: 200 turns · 9 sub · budgeting on'), `high row wrong: ${text}`);
+  assert.ok(text.includes('Ultra: no cap · budgeting off'), `ultra row wrong: ${text}`);
   assert.equal(text.split('\n').length, 4, 'must render exactly 4 notch rows');
 });
 
@@ -113,10 +113,10 @@ test('renderEffortInfo falls back to built-in defaults when the keys are absent'
 
   const text = dom.elements['#effort-slider-info'].textContent;
   // Fallback nested caps are the real settings.py values (low1/med3/high7).
-  assert.ok(text.includes('Low: 30 turns · 1 sub · budgeting off'), `low row wrong: ${text}`);
-  assert.ok(text.includes('Med: 50 turns · 3 sub · budgeting off'), `med row wrong: ${text}`);
-  assert.ok(text.includes('High: 100 turns · 7 sub · budgeting off'), `high row wrong: ${text}`);
-  assert.ok(text.includes('Ultra: no cap · budgeting on'), `ultra row wrong: ${text}`);
+  assert.ok(text.includes('Low: 30 turns · 1 sub · budgeting on'), `low row wrong: ${text}`);
+  assert.ok(text.includes('Med: 50 turns · 3 sub · budgeting on'), `med row wrong: ${text}`);
+  assert.ok(text.includes('High: 100 turns · 7 sub · budgeting on'), `high row wrong: ${text}`);
+  assert.ok(text.includes('Ultra: no cap · budgeting off'), `ultra row wrong: ${text}`);
 });
 
 test('renderEffortInfo is a no-op when the info element is absent (no crash)', () => {
