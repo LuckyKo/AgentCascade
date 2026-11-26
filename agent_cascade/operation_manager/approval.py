@@ -47,6 +47,11 @@ class PendingApproval:
     # non-batch path (and the WebUI payload via list_pending_approvals, which never reads these) unchanged.
     kv_skip_save: bool = False
     kv_defer_restore: bool = False
+    # BUG_0425 preview-before-commit: a short, human-readable preview of the concrete effect
+    # of this tool call (unified diff for write/edit, affected-files+sizes for delete/copy/move,
+    # command-echo for shell). Only populated when a preview flag is ON; defaults '' so every
+    # existing approval (and the list_pending_approvals payload via getattr) is unchanged.
+    preview: str = ''
 
 
 # ─── Constants (imported by api_server.py — must remain importable from package level) ──
@@ -110,6 +115,47 @@ class ApprovalMixin:
         owner = self._get_owner(resolved)
         return owner == agent_name
 
+    # ─── Preview-Verified Auto-Confirm (BUG_0425) ───────────────────────────
+
+    def preview_auto_confirms(self, *, preview: str, affected_paths, agent_name: str,
+                              low_risk: bool = True) -> bool:
+        """Decide whether a computed preview lets this op skip the human gate (BUG_0425).
+
+        Deliberately NOT ``_is_auto_approved`` (11 callers, no preview param — see plan R5):
+        this is a separate, bounded policy consulted only at the in-scope file/shell gates.
+        Returns True ONLY when ALL hold:
+          - settings.TOOL_AUTO_CONFIRM_ENABLED is on;
+          - the scope policy is the conservative 'owned-in-workspace';
+          - a non-empty ``preview`` exists and is bounded (line count ≤
+            settings.TOOL_AUTO_CONFIRM_MAX_DIFF_LINES);
+          - ``low_risk`` (caller-supplied: True for bounded owned file ops, False to force
+            escalation, e.g. a non-read-only shell command that reached the gate);
+          - EVERY path in ``affected_paths`` resolves inside the workspace (self._resolve_path
+            does not raise) AND is owned by ``agent_name`` (self._get_owner == agent_name).
+
+        Reads only settings.<FLAG>, self._resolve_path, and self._get_owner, so it can be
+        driven unbound with a minimal self-double in tests.
+        """
+        from agent_cascade import settings
+        if not settings.TOOL_AUTO_CONFIRM_ENABLED:
+            return False
+        if (settings.TOOL_AUTO_CONFIRM_SCOPE or '').strip().lower() != 'owned-in-workspace':
+            return False
+        if not preview or not low_risk:
+            return False
+        if len(preview.splitlines()) > settings.TOOL_AUTO_CONFIRM_MAX_DIFF_LINES:
+            return False
+        if not affected_paths:
+            return False
+        for p in affected_paths:
+            try:
+                resolved = self._resolve_path(str(p), mode='rw')
+            except Exception:
+                return False  # outside the allowed RW directories → not in-workspace
+            if self._get_owner(resolved) != agent_name:
+                return False  # not owned by this agent
+        return True
+
     # ─── Blocking Approval API ────────────────────────────────────────────
 
     def request_user_approval(
@@ -120,6 +166,7 @@ class ApprovalMixin:
         description: str = '',
         kv_skip_save: bool = False,
         kv_defer_restore: bool = False,
+        preview: str = '',
     ) -> Tuple[bool, str]:
         """
         Block the calling thread until the user approves or rejects.
@@ -128,6 +175,11 @@ class ApprovalMixin:
         (see PendingApproval); they are stored on the record and read back by the security
         advisor via get_approval_kv_batch_hints. Both default False so every non-batch
         caller (and list_pending_approvals' WebUI payload) is unchanged.
+
+        preview is an optional human-readable preview of the call's concrete effect
+        (BUG_0425 preview-before-commit). It defaults '' so callers that do not compute a
+        preview are byte-identical to before; when non-empty it is surfaced in the Telegram
+        push and the list_pending_approvals payload.
 
         Returns:
             (True, "") if approved
@@ -150,6 +202,7 @@ class ApprovalMixin:
             justification=str(just),
             kv_skip_save=kv_skip_save,
             kv_defer_restore=kv_defer_restore,
+            preview=str(preview or ''),
         )
 
         with self._lock:
@@ -190,6 +243,8 @@ class ApprovalMixin:
                         msg_lines.append(description)
                     if just:
                         msg_lines.append(f'Reason: {just}')
+                    if approval.preview:
+                        msg_lines.append('Preview:\n' + approval.preview)
                     msg_lines.append('Reply /yes to approve or /no to reject.')
                     sup.notify_user('\n'.join(msg_lines), instance_name=agent_name)
                 except Exception:
@@ -274,6 +329,7 @@ class ApprovalMixin:
                 'tool_args': a.tool_args,
                 'description': a.description,
                 'justification': getattr(a, 'justification', ''),
+                'preview': getattr(a, 'preview', ''),
                 'timestamp': a.timestamp,
             } for a in self.pending.values()]
 

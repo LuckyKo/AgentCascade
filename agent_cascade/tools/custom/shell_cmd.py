@@ -15,8 +15,20 @@ from agent_cascade.settings import (ASYNC_SHELL_DEFAULT_TIMEOUT, AUTO_ASYNC_TIME
 from agent_cascade.tool_utils import truncate_with_spillover
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.tools.schema_common import tool_params
+from agent_cascade import settings as _ac_settings
 
 logger = logging.getLogger(__name__)
+
+
+# BUG_0425: advertised ONLY when settings.TOOL_DRY_RUN_ENABLED is on (see the advertisement
+# block near the end of this module), so with the flag OFF (default) the dry_run key never
+# enters the shell_cmd schema and the default call paths stay byte-identical to before. Text
+# byte-identical to file_ops._DRY_RUN_DESC (the canonical source); duplicated here deliberately
+# to avoid pulling the large file_ops module and its whole tool-registration import graph into
+# shell_cmd's import chain just for one constant string.
+_DRY_RUN_DESC = ('When true, preview the concrete effect (diff / affected files / sizes) WITHOUT '
+                 'changing anything. No mutation, no backup, no approval. Requires '
+                 'TOOL_DRY_RUN_ENABLED to be advertised.')
 
 
 def _has_real_wait_for_message(pool) -> bool:
@@ -373,6 +385,9 @@ class ShellCmd(BaseTool):
         justification = params.get('justification')
         cwd = params.get('cwd', '.')
         timeout = params.get('timeout')  # None means use default (30s sync / 3600s async)
+        # BUG_0425: dry_run defaults to False so every existing call path is byte-identical; the
+        # schema only advertises it when settings.TOOL_DRY_RUN_ENABLED is on.
+        dry_run = params.get('dry_run', False)
 
         # BUG_0053/0092: reject POSIX tools / PowerShell cmdlets on Windows hosts early.
         dialect_err = ShellCmd._check_windows_dialect(command)
@@ -484,6 +499,10 @@ class ShellCmd(BaseTool):
                             f"[shell_cmd] low free VRAM on GPU(s) {', '.join(map(str, press['low_vram_gpus']))}: "
                             f"consider execution_mode='safe' if you run any command that may use significant VRAM.")
 
+        # BUG_0425: forward dry_run ONLY when truthy to the internal dispatchers. A default
+        # (dry_run=False) call forwards no dry_run kwarg — byte-identical to pre-BUG_0425, so the
+        # strict-signature dispatcher doubles are not broken; dry_run=True still forwards it.
+        om_kwargs = {'dry_run': True} if dry_run else {}
         # ── Async mode: launch new background shell ────────────────
         if run_async:
             # Validate control commands aren't used without tool_id
@@ -496,6 +515,7 @@ class ShellCmd(BaseTool):
                 cwd=cwd,
                 timeout=timeout,
                 heartbeat_interval=heartbeat_interval,
+                **om_kwargs,
             )
 
         # ── Sync mode (default): blocking execution ────────────────
@@ -520,6 +540,7 @@ class ShellCmd(BaseTool):
                 timeout=timeout,
                 guard_is_first=guard_is_first,
                 guard_is_last=guard_is_last,
+                **om_kwargs,
             )
         return self._execute_sync(
             agent_name=agent_name,
@@ -529,6 +550,7 @@ class ShellCmd(BaseTool):
             timeout=timeout,
             guard_is_first=guard_is_first,
             guard_is_last=guard_is_last,
+            **om_kwargs,
         )
 
     # ────────────────────────────────────────────────────────────────
@@ -842,6 +864,7 @@ class ShellCmd(BaseTool):
         cwd: str,
         timeout: int,
         heartbeat_interval: float,
+        dry_run: bool = False,
     ) -> str:
         """Launch a shell command in the background and return immediately.
 
@@ -923,6 +946,23 @@ class ShellCmd(BaseTool):
             is_safe, _new_file_targets = _decision
         else:
             is_safe, _new_file_targets = strict, []
+
+        # BUG_0425: dry-run returns the command-echo preview via the AUTHORITATIVE execution
+        # site (operation_manager.execute_shell_command, which echoes + resolves cwd + redirect
+        # targets, then returns BEFORE its own gate/spawn). Placed after the restricted-agent
+        # rejection (security still enforced) and before the approval block + tracker.launch below,
+        # so neither request_user_approval NOR the process spawn runs — no process is ever started.
+        if dry_run:
+            if _op_mgr is not None:
+                return _op_mgr.execute_shell_command(
+                    command=command,
+                    justification=justification,
+                    agent_name=agent_name,
+                    cwd=cwd,
+                    execution_mode='async',
+                    dry_run=True,
+                )
+            return '[shell_cmd] Dry-run unavailable (no operation_manager attached).'
 
         if not is_safe:
             description = (f"⚠️ **SECURITY WARNING**: This is a host shell command running in async (background) mode. "
@@ -1194,6 +1234,7 @@ class ShellCmd(BaseTool):
         timeout: int,
         guard_is_first: bool = True,
         guard_is_last: bool = True,
+        dry_run: bool = False,
     ) -> str:
         """Execute a shell command synchronously (blocking).
 
@@ -1230,6 +1271,7 @@ class ShellCmd(BaseTool):
             execution_mode='sync',
             guard_is_first=guard_is_first,  # batch hints: tell the advisor to skip-save / defer-restore
             guard_is_last=guard_is_last,
+            dry_run=dry_run,
         )
         note = ShellCmd._execution_notes(command, was_stripped)
         return f"{note}{result}"
@@ -1257,6 +1299,7 @@ class ShellCmd(BaseTool):
         timeout: int,
         guard_is_first: bool = True,
         guard_is_last: bool = True,
+        dry_run: bool = False,
     ) -> str:
         """Blocking execution that frees local model RAM/VRAM around the command.
 
@@ -1398,6 +1441,7 @@ class ShellCmd(BaseTool):
                 before_execute=(_release_model if capable else None),
                 guard_is_first=guard_is_first,  # batch hints: tell the advisor to skip-save / defer-restore
                 guard_is_last=guard_is_last,
+                dry_run=dry_run,
             )
         finally:
             # BUG_0150: probe BEFORE the restore below — that restore loads OUR model, which
@@ -1537,3 +1581,19 @@ class ShellCmd(BaseTool):
                 from agent_cascade.operation_manager import _queue_tool_warning
                 _queue_tool_warning(pool, agent_name, '\n'.join(_lines))
         return result
+
+
+def _advertise_dry_run_params() -> None:
+    """BUG_0425: add the optional ``dry_run`` boolean to the shell_cmd schema.
+
+    Reads the live ``settings.TOOL_DRY_RUN_ENABLED`` handle (monkeypatchable). Kept as a
+    function so a test can flip the flag and re-apply without reloading the module. The
+    property is never added when the flag is off, so the default schema is unchanged and
+    the default metadata-invariant test passes with NO dna.py edit.
+    """
+    if not _ac_settings.TOOL_DRY_RUN_ENABLED:
+        return
+    ShellCmd.parameters['properties']['dry_run'] = {'type': 'boolean', 'description': _DRY_RUN_DESC}
+
+
+_advertise_dry_run_params()

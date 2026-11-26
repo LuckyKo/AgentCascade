@@ -4597,6 +4597,15 @@ function renderApprovals() {
       justificationHtml = `<div class="approval-justification">${justification}</div>`;
     }
 
+    // BUG_0425 preview-before-commit: render the concrete effect (unified diff / affected
+    // files / command-echo) under the justification when present. Reuses .approval-args-block
+    // styling (monospace + scroll) since a preview is read-only pre-formatted text. Only
+    // populated when a preview flag is ON, so the default card is unchanged.
+    let previewHtml = '';
+    if (ap.preview && ap.preview.trim()) {
+      previewHtml = `<pre class="approval-args-block">${escapeHtml(ap.preview.trim())}</pre>`;
+    }
+
     // Tool icon based on tool name for visual clarity
     const toolIconMap = {
       'write_file': '📝', 'read_file': '📄', 'edit_file': '✏️',
@@ -4614,6 +4623,7 @@ function renderApprovals() {
         <span class="approval-agent-label">by ${escapeHtml(ap.agent_name)}</span>
       </div>
       ${justificationHtml}
+      ${previewHtml}
       <pre class="approval-args-block">${argsHtml}</pre>
       ${securityHtml}
       <div class="approval-actions">

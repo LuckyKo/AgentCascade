@@ -27,6 +27,7 @@ from agent_cascade.tools.schema_common import (
 from agent_cascade.settings import (DEFAULT_READ_FILE_MAX_CHARS, DEFAULT_READ_FILE_MAX_LINES,
                                     DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_WILD_READ_TRUNCATION_CHARS,
                                     IMAGE_MAX_SHORT_SIDE)
+from agent_cascade import settings as _ac_settings
 from agent_cascade.tool_utils import set_truncation_hints
 from agent_cascade.tools.base import BaseTool, register_tool
 from agent_cascade.utils.media_utils import (MediaStorageError, is_under_media_root, save_image_to_media,
@@ -34,6 +35,15 @@ from agent_cascade.utils.media_utils import (MediaStorageError, is_under_media_r
 from agent_cascade.utils.utils import (_HTTP_FETCH_HEADERS, _HTTP_FETCH_TIMEOUT, MAX_DATA_URL_SIZE,
                                        encode_audio_as_base64, encode_image_as_base64, encode_video_as_base64,
                                        is_http_url, json_loads)
+
+
+# BUG_0425: advertised ONLY when settings.TOOL_DRY_RUN_ENABLED is on (see the
+# advertisement block near the end of this module), so with the flag OFF (default)
+# the dry_run key never enters any tool schema and the default call paths are
+# byte-identical to before.
+_DRY_RUN_DESC = ('When true, preview the concrete effect (diff / affected files / sizes) WITHOUT '
+                 'changing anything. No mutation, no backup, no approval. Requires '
+                 'TOOL_DRY_RUN_ENABLED to be advertised.')
 
 
 def _is_temp_file(p) -> bool:
@@ -1568,16 +1578,23 @@ class WriteFile(BaseTool, PathResolutionMixin):
         path = params_json.get('path')
         content = params_json.get('content', '')
         justification = params_json.get('justification', '')
+        dry_run = params_json.get('dry_run', False)
 
         # Content is written exactly as delivered (raw parsed value). A leading ``` fence
         # is legitimate content and must be preserved. The legacy "path\n```code```"
         # non-JSON case is handled by the fallback path above.
         agent_name = self._get_agent_name(kwargs)
+        # BUG_0425: forward dry_run only when truthy so a default (dry_run=False) call is
+        # byte-identical to pre-BUG_0425 (no dry_run kwarg); dry_run=True still forwards it.
+        om_kwargs = {}
+        if dry_run:
+            om_kwargs['dry_run'] = True
         return self.agent_pool.operation_manager.write_file(
             path=path,
             content=content,
             agent_name=agent_name,
             justification=justification,
+            **om_kwargs,
         )
 
 
@@ -1750,6 +1767,12 @@ class EditFile(BaseTool, PathResolutionMixin):
                 return msg
 
         agent_name = self._get_agent_name(kwargs)
+        dry_run = params_json.get('dry_run', False)
+        # BUG_0425: forward dry_run only when truthy so a default (dry_run=False) call is
+        # byte-identical to pre-BUG_0425 (no dry_run kwarg); dry_run=True still forwards it.
+        om_kwargs = {}
+        if dry_run:
+            om_kwargs['dry_run'] = True
         return self.agent_pool.operation_manager.edit_file(
             path=path,
             agent_name=agent_name,
@@ -1759,6 +1782,7 @@ class EditFile(BaseTool, PathResolutionMixin):
             range_param=range_param,
             occurrence=occurrence,
             justification=justification,
+            **om_kwargs,
         )
 
 
@@ -2219,12 +2243,19 @@ class DeleteFile(BaseTool):
             return "ERROR: Provide at least one of 'path' (string or list)."
         justification = params.get('justification', '')
         agent_name = self._get_agent_name(kwargs)
+        dry_run = params.get('dry_run', False)
+        # BUG_0425: forward dry_run only when truthy so a default (dry_run=False) call is
+        # byte-identical to pre-BUG_0425 (no dry_run kwarg); dry_run=True still forwards it.
+        om_kwargs = {}
+        if dry_run:
+            om_kwargs['dry_run'] = True
         return self.agent_pool.operation_manager.delete_file(
             path,
             agent_name,
             paths=paths,
             include=params.get('include'),
             justification=justification,
+            **om_kwargs,
         )
 
 
@@ -2257,7 +2288,14 @@ class CopyFile(BaseTool):
         destination = params['destination']
         justification = params.get('justification', '')
         agent_name = self._get_agent_name(kwargs)
-        return self.agent_pool.operation_manager.copy_file(source, destination, agent_name, justification=justification)
+        dry_run = params.get('dry_run', False)
+        # BUG_0425: forward dry_run only when truthy so a default (dry_run=False) call is
+        # byte-identical to pre-BUG_0425 (no dry_run kwarg); dry_run=True still forwards it.
+        om_kwargs = {}
+        if dry_run:
+            om_kwargs['dry_run'] = True
+        return self.agent_pool.operation_manager.copy_file(
+            source, destination, agent_name, justification=justification, **om_kwargs)
 
 
 @register_tool('re_indent', allow_overwrite=True)
@@ -2345,3 +2383,21 @@ class ReIndent(BaseTool):
             mode=mode,
             justification=justification,
         )
+
+
+def _advertise_dry_run_params() -> None:
+    """BUG_0425: add the optional ``dry_run`` boolean to the file-tool schemas.
+
+    Reads the live ``settings.TOOL_DRY_RUN_ENABLED`` handle (monkeypatchable). Kept as a
+    function so a test can flip the flag and re-apply without reloading the module. The
+    property is never added when the flag is off, so the default schema is unchanged.
+    ReIndent is intentionally excluded — its operation_manager.re_indent has no dry_run.
+    """
+    if not _ac_settings.TOOL_DRY_RUN_ENABLED:
+        return
+    _node = {'type': 'boolean', 'description': _DRY_RUN_DESC}
+    for _cls in (WriteFile, EditFile, DeleteFile, CopyFile):
+        _cls.parameters['properties']['dry_run'] = _node
+
+
+_advertise_dry_run_params()

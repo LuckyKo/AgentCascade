@@ -1227,6 +1227,22 @@ class ShellMixin:
         all_ok, paths, _reason = self._resolve_shell_redirect_targets(targets, resolved_cwd)
         return (all_ok, paths if all_ok else [])
 
+    def _shell_dry_run_preview(self, command: str, resolved_cwd, redirect_targets) -> str:
+        """Read-only command-echo + resolved-cwd + redirect-target preview for shell dry-run
+        (BUG_0425). Mirrors the approval `description` composition in execute_shell_command but
+        spawns NO process and requests no approval.
+        """
+        preview = (
+            f"[DRY RUN] would execute (NOT run):\n"
+            f"**CWD**: {resolved_cwd}\n"
+            f"**Shell Command**:\n```bash\n{command}\n```"
+        )
+        if redirect_targets:
+            _, _, _why = self._resolve_shell_redirect_targets(redirect_targets, resolved_cwd)
+            if _why:
+                preview += f"\n\nRedirect targets: {_why}"
+        return preview
+
     # ------------------------------------------------------------------
     def execute_shell_command(
         self,
@@ -1240,8 +1256,13 @@ class ShellMixin:
         before_execute: Optional[Callable[[], None]] = None,
         guard_is_first: bool = True,
         guard_is_last: bool = True,
+        dry_run: bool = False,
     ) -> str:
-        """Execute a shell command — auto-approved for safe read-only commands."""
+        """Execute a shell command — auto-approved for safe read-only commands.
+
+        dry_run=True (BUG_0425) returns a command-echo + resolved-cwd + redirect-target preview
+        WITHOUT executing or requesting approval. Off (default) is unchanged.
+        """
         try:
             from agent_cascade.utils.tool_path_resolver import resolve_tool_path
             resolved_cwd = resolve_tool_path(cwd, mode='rw', agent_pool=self.agent_pool)
@@ -1275,6 +1296,12 @@ class ShellMixin:
                     'Only read-only filesystem/git commands are permitted. '
                     'Use __help to see allowed commands.')
 
+        # BUG_0425: dry-run returns the command-echo preview AFTER the restricted-agent
+        # security rejection (security still enforced) but BEFORE the approval gate and before
+        # any execution — no process is spawned.
+        if dry_run:
+            return self._shell_dry_run_preview(command, resolved_cwd, redirect_targets)
+
         if is_safe:
             approved = True
             reason = 'Auto-approved: safe read-only filesystem operation'
@@ -1296,6 +1323,7 @@ class ShellMixin:
                 if _why:
                     description += f"\n\nWhy this prompted: {_why}"
 
+            from agent_cascade import settings
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='shell_cmd',
@@ -1307,6 +1335,9 @@ class ShellMixin:
                     'timeout': effective_timeout,
                 },
                 description=description,
+                # BUG_0425: surface the command-echo on the approval when the preview flag is on
+                # (else '' → unchanged). Shell previews are deliberately NOT auto-confirmed.
+                preview=(description if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL else ''),
                 # Batch guard hints → PendingApproval (read back by the advisor via
                 # _get_approval_kv_batch_hints). NOT the last guard → defer the restore; NOT the
                 # first guard → an earlier guard already saved → skip the save. Both default False

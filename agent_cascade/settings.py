@@ -164,6 +164,52 @@ UNLOAD_UNUSED_TOOLS_POST_COMPRESSION: bool = os.getenv(
     'AGENT_CASCADE_UNLOAD_UNUSED_TOOLS_POST_COMPRESSION', '0'
 ).strip().lower() in ('1', 'true')
 
+# ── Tool dry-run / preview-before-commit + preview-verified auto-confirm (BUG_0425) ──
+# Optional preview of a side-effecting tool's concrete effect (unified diff for write/edit,
+# affected-files+sizes for delete/copy/move, command-echo for shell) BEFORE it commits, plus
+# the ability to surface that preview on the approval a human sees and to auto-confirm a
+# bounded, in-workspace, agent-owned change. ALL FIVE default OFF ⇒ every gated code path
+# behaves exactly as before (no preview computed, no dry_run param advertised to the model,
+# no auto-confirm). Gated sites read settings.<FLAG> (module attribute) so tests can
+# monkeypatch it.
+#
+# TOOL_DRY_RUN_ENABLED: when ON, side-effecting tools advertise a `dry_run` boolean schema
+# param and honour it — dry_run=True returns the preview WITHOUT touching disk (no write, no
+# backup, no ownership change, no approval request). OFF (default) ⇒ the param is not in the
+# schema, so the model cannot request it and every call path is unchanged.
+TOOL_DRY_RUN_ENABLED: bool = os.getenv(
+    'AGENT_CASCADE_TOOL_DRY_RUN_ENABLED', '0'
+).strip().lower() in ('1', 'true')
+#
+# TOOL_PREVIEW_ATTACHED_TO_APPROVAL: when ON, a tool call that DOES require a human approval
+# carries its computed preview (diff / affected-files / command-echo) on the PendingApproval,
+# surfaced in the Telegram body, the REST list_pending_approvals payload, and the WebUI. A
+# no-op without a preview, so defaulting OFF is consistent.
+TOOL_PREVIEW_ATTACHED_TO_APPROVAL: bool = os.getenv(
+    'AGENT_CASCADE_TOOL_PREVIEW_ATTACHED_TO_APPROVAL', '0'
+).strip().lower() in ('1', 'true')
+#
+# TOOL_AUTO_CONFIRM_ENABLED: when ON, a bounded, in-workspace, agent-owned, low-risk preview
+# may skip the human approval gate (see ApprovalMixin.preview_auto_confirms). OFF (default) ⇒
+# every non-auto-approved operation still blocks on the human/security gate exactly as today.
+TOOL_AUTO_CONFIRM_ENABLED: bool = os.getenv(
+    'AGENT_CASCADE_TOOL_AUTO_CONFIRM_ENABLED', '0'
+).strip().lower() in ('1', 'true')
+#
+# TOOL_AUTO_CONFIRM_MAX_DIFF_LINES: the ceiling on preview size (in diff lines) for an
+# auto-confirm — a preview longer than this is treated as too big to trust and escalates.
+# Only consulted when TOOL_AUTO_CONFIRM_ENABLED is on. Default 200.
+TOOL_AUTO_CONFIRM_MAX_DIFF_LINES: int = int(os.getenv('AGENT_CASCADE_TOOL_AUTO_CONFIRM_MAX_DIFF_LINES', 200))
+#
+# TOOL_AUTO_CONFIRM_SCOPE: the ownership/scope policy for auto-confirm. 'owned-in-workspace'
+# (default) requires every affected path to resolve inside the workspace AND be owned by the
+# requesting agent. Any other value is treated as the most conservative (no auto-confirm) —
+# unknown values fall back to 'owned-in-workspace' rather than widening the blast radius.
+TOOL_AUTO_CONFIRM_SCOPE: str = (
+    os.getenv('AGENT_CASCADE_TOOL_AUTO_CONFIRM_SCOPE', 'owned-in-workspace').strip().lower()
+    or 'owned-in-workspace'
+)
+
 # ── Lazy / on-use MCP server connect (BUG_0310 follow-up) ────────────────────
 # Default ON. Boot PARKS every enabled MCP server — it registers stub tool objects carrying
 # real schema (read from config/mcp_tools_cache.json) into every template's function_map and

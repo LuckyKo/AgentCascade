@@ -1076,6 +1076,33 @@ def build_approval_args(executor_params, *, exclude=frozenset(),
     return args
 
 
+def _build_unified_diff_preview(old_text: str, new_text: str, path: str) -> str:
+    """Unified-diff preview of an old→new text change (BUG_0425).
+
+    Single source for the diff the edit_file response shows AND the write/edit dry-run /
+    preview-attached-to-approval previews, so they never drift. Byte-identical to the block
+    formerly inlined in edit_file (L3032-3046 @ a61375a0): difflib.unified_diff with the
+    '---/+++' headers stripped, then 8 head + 8 tail + ellipsis when longer than 20 lines.
+    keepends=False via splitlines() avoids doubled newlines on re-join. Returns '' when there
+    is no change. (A create/empty-old is labelled by the write_file dry-run caller, not here,
+    so an edit_file on a genuinely empty existing file keeps its existing ''-vs-header output.)
+    """
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    diff_lines = list(
+        difflib.unified_diff(old_lines, new_lines, fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''))
+    # Skip --- and +++ headers (first 2), keep @@ headers and content
+    diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
+    # Limit to 20 lines max; truncate with ellipsis if longer
+    if diff_content:
+        all_diff_lines = diff_content.splitlines()
+        if len(all_diff_lines) > 20:
+            first_lines = all_diff_lines[:8]
+            last_lines = all_diff_lines[-8:]
+            diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+    return diff_content
+
+
 class FileOpsMixin:
     """File operation methods. Expects self to have __init__-set attributes."""
 
@@ -1092,7 +1119,7 @@ class FileOpsMixin:
     # Parameters that are executor routing / internal control, not part of the
     # user-visible meaning of the call, so they are never handed to the security
     # approver. Centralized so _approval_args always drops them.
-    _APPROVAL_INTERNAL_PARAMS = frozenset({'self', 'agent_name', 'pre_approved'})
+    _APPROVAL_INTERNAL_PARAMS = frozenset({'self', 'agent_name', 'pre_approved', 'dry_run'})
 
     def _approval_args(self, *, drop_none=False, preview=None):
         """Derive the security-approver ``tool_args`` from the CALLING file-op
@@ -1368,6 +1395,36 @@ class FileOpsMixin:
             return f"(file, {line_count} lines, {size_str})"
         except (UnicodeDecodeError, OSError):
             return f"(file, binary, {size_str})"
+
+    def _preview_write_diff(self, resolved, content: str, path: str) -> str:
+        """Read-only unified-diff preview of a would-be write (BUG_0425). Never mutates disk.
+
+        Reads the existing bytes only when the file already exists; a new file reports a
+        create. Returns a human-readable preview string.
+        """
+        if not resolved.exists():
+            return f"[new file] would create {path} ({len(content)} chars)"
+        try:
+            old_text = resolved.read_text(encoding='utf-8', errors='replace')
+        except (OSError, UnicodeDecodeError):
+            old_text = ''
+        diff = _build_unified_diff_preview(old_text, content, path)
+        return diff or '[no textual change (identical or binary content)]'
+
+    def _affected_files_preview(self, targets, header: str) -> str:
+        """Read-only affected-files + sizes preview for delete/copy/move dry-run (BUG_0425).
+
+        Reuses _compute_scope_info per target (which stats/reads the file, never writes).
+        Missing targets are reported as absent rather than stat-crashing.
+        """
+        lines = [f"[DRY RUN] {header}"]
+        for t in targets:
+            tp = Path(t)
+            if tp.exists():
+                lines.append(f"  - {tp} {self._compute_scope_info(tp)}")
+            else:
+                lines.append(f"  - {tp} (absent)")
+        return '\n'.join(lines)
 
     @staticmethod
     def _matches_filters(
@@ -2277,13 +2334,21 @@ class FileOpsMixin:
 
     # ─── Write file ──────────────────────────────────────────────────────
 
-    def write_file(self, path: str, content: str, agent_name: str, justification: str = '') -> str:
-        """Write a file — auto-approved for new files and owned files."""
+    def write_file(self, path: str, content: str, agent_name: str, justification: str = '',
+                   dry_run: bool = False) -> str:
+        """Write a file — auto-approved for new files and owned files.
+
+        dry_run=True (BUG_0425) returns the would-be diff WITHOUT touching disk — no write,
+        backup, ownership change, or approval request. Off (default) keeps every path as before.
+        """
         try:
             resolved = self._resolve_path(path, mode='rw')
         except Exception as e:
             return f"ERROR: {str(e)}"
         is_new = not resolved.exists()
+
+        if dry_run:
+            return self._preview_write_diff(resolved, content, path)
 
         # Clobber-guard baseline for the overwrite branch: capture the target's mtime+size
         # now, BEFORE the unbounded approval wait, so the commit region can detect a write
@@ -2301,15 +2366,27 @@ class FileOpsMixin:
 
         if not self._is_auto_approved(path, agent_name, creating_new=True):
             description = f"Overwrite existing file: {path} ({len(content)} chars)"
-            approved, reason = self.request_user_approval(
-                agent_name=agent_name,
-                tool_name='write_file',
-                tool_args=self._approval_args(),
-                description=description,
-            )
-            if not approved:
-                return f"REJECTED: {reason}"
-            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
+            # BUG_0425: with preview/auto-confirm on, compute the preview once; a bounded,
+            # owned, in-workspace preview can skip the human gate. Flags off ⇒ preview stays
+            # '' and the request_user_approval call below is byte-identical to before.
+            from agent_cascade import settings
+            preview = ''
+            if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL or settings.TOOL_AUTO_CONFIRM_ENABLED:
+                preview = self._preview_write_diff(resolved, content, path)
+            if preview and self.preview_auto_confirms(
+                    preview=preview, affected_paths=[resolved], agent_name=agent_name):
+                approver_reason = ''  # preview-verified auto-confirm, no human gate
+            else:
+                approved, reason = self.request_user_approval(
+                    agent_name=agent_name,
+                    tool_name='write_file',
+                    tool_args=self._approval_args(),
+                    description=description,
+                    preview=(preview if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL else ''),
+                )
+                if not approved:
+                    return f"REJECTED: {reason}"
+                approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
             approver_reason = ''
 
@@ -2834,13 +2911,17 @@ class FileOpsMixin:
                   range_param: str = None,
                   occurrence: int = None,
                   justification: str = '',
-                  pre_approved: bool = False) -> str:
+                  pre_approved: bool = False,
+                  dry_run: bool = False) -> str:
         """Edit a file surgically — auto-approved for agent-owned files.
 
         `pre_approved`: set by the grouped-batch executor after the whole group is
         approved; skips the per-call approval for a member already covered by the
         group decision. It does NOT skip the memory-vault screen, the concurrent
         modification guard, the backup, or ownership — only the user/security gate.
+
+        `dry_run` (BUG_0425): returns the would-be unified diff WITHOUT writing, backing
+        up, changing ownership, or requesting approval. Off (default) keeps every path as before.
         """
         try:
             resolved = self._resolve_path(path, mode='rw')
@@ -2952,6 +3033,9 @@ class FileOpsMixin:
                     f"old_content unchanged, changes nothing. To adjust blank lines use "
                     f"match_mode='exact' and include surrounding non-blank context in old_content.")
 
+        if dry_run:
+            return _build_unified_diff_preview(file_content, new_file_content, path)
+
         # BUG_0394: for delete_and_insert the advisor only ever sees the raw range
         # string, which invites a "wipes the whole file" misread of the EOF-append form
         # ('0'). Enrich the (already free-form, advisor-read) description with the
@@ -2969,15 +3053,26 @@ class FileOpsMixin:
             # below — only the user/security gate is skipped.
             approver_reason = ''
         elif not self._is_auto_approved(path, agent_name):
-            approved, reason = self.request_user_approval(
-                agent_name=agent_name,
-                tool_name='edit_file',
-                tool_args=self._approval_args(drop_none=True),
-                description=description,
-            )
-            if not approved:
-                return f"REJECTED: {reason}"
-            approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
+            # BUG_0425: compute the preview once when a preview/auto-confirm flag is on;
+            # flags off ⇒ preview stays '' and the request below is byte-identical.
+            from agent_cascade import settings
+            preview = ''
+            if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL or settings.TOOL_AUTO_CONFIRM_ENABLED:
+                preview = _build_unified_diff_preview(file_content, new_file_content, path)
+            if preview and self.preview_auto_confirms(
+                    preview=preview, affected_paths=[resolved], agent_name=agent_name):
+                approver_reason = ''  # preview-verified auto-confirm, no human gate
+            else:
+                approved, reason = self.request_user_approval(
+                    agent_name=agent_name,
+                    tool_name='edit_file',
+                    tool_args=self._approval_args(drop_none=True),
+                    description=description,
+                    preview=(preview if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL else ''),
+                )
+                if not approved:
+                    return f"REJECTED: {reason}"
+                approver_reason = reason  # BUG_0039: keep provenance — do not overwrite the caller's justification
         else:
             approver_reason = ''
 
@@ -3029,21 +3124,10 @@ class FileOpsMixin:
                 # left the anchor behind). Computed before the write; the bytes are untouched.
                 duplicate_note = _adjacent_duplicate_note(file_content, new_file_content, match_mode)
 
-                # Generate unified diff before writing (both old and new content available)
-                # keepends=False: avoids double-newlines when joined with '\n' below
-                old_lines = file_content.splitlines()
-                new_lines = new_file_content.splitlines()
-                diff_lines = list(
-                    difflib.unified_diff(old_lines, new_lines, fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''))
-                # Skip --- and +++ headers (first 2), keep @@ headers and content
-                diff_content = '\n'.join(diff_lines[2:]) if len(diff_lines) > 2 else ''
-                # Limit to 20 lines max; truncate with ellipsis if longer
-                if diff_content:
-                    all_diff_lines = diff_content.splitlines()
-                    if len(all_diff_lines) > 20:
-                        first_lines = all_diff_lines[:8]
-                        last_lines = all_diff_lines[-8:]
-                        diff_content = '\n'.join(first_lines + ['...'] + last_lines)
+                # Generate unified diff before writing (both old and new content available).
+                # _build_unified_diff_preview is the single source shared with the dry-run /
+                # preview-attached-to-approval paths, so the response diff and the preview never drift.
+                diff_content = _build_unified_diff_preview(file_content, new_file_content, path)
 
                 resolved.write_bytes(_render_with_newlines(new_file_content, newline_style))
                 self._own(resolved, agent_name)
@@ -3719,12 +3803,16 @@ class FileOpsMixin:
         modified_after: Optional[str] = None,
         modified_before: Optional[str] = None,
         justification: str = '',
+        dry_run: bool = False,
     ) -> str:
         """Delete one or more files/directories.
 
         Accepts a single ``path`` (backward-compatible) and/or a ``paths`` list for
         bulk deletion. Filters (``include``/``exclude``/size/date) are applied within
         the resolved base directory of ``path``, mirroring ``list_dir`` semantics.
+
+        dry_run=True (BUG_0425) returns an affected-files + sizes preview WITHOUT backing
+        up or deleting anything and WITHOUT requesting approval. Off (default) is unchanged.
 
         Flow: symlink-check(s) → resolve/expand targets → empty check (B6) → approval
         (B3, single aggregate prompt when needed) → per-target delete with
@@ -3784,6 +3872,9 @@ class FileOpsMixin:
             detail = '; '.join(errors) if errors else 'no entries matched the given path/filter'
             return f"No files matched (0 of {len(explicit)} requested). {detail}"
 
+        if dry_run:
+            return self._affected_files_preview(targets, f'would delete {len(targets)} target(s)')
+
         # ── B3: approval model for bulk deletes. ────────────────────────────────
         # Auto-approve only if ALL targets are agent-owned. Otherwise fire a SINGLE
         # aggregate prompt. The WebUI (web_ui/app.js renderApprovals) renders ONLY the
@@ -3798,7 +3889,17 @@ class FileOpsMixin:
         # the already-resolved path string is idempotent (re-resolution lands on the same
         # contained path) — safe, though it does re-resolve per target.
         non_owned = [t for t in targets if not self._is_auto_approved(str(t), agent_name)]
-        if non_owned:
+        # BUG_0425: with a preview/auto-confirm flag on, compute the affected-files preview
+        # once. Flags off ⇒ _preview stays '' and _auto_ok is False, so the gate below is
+        # byte-identical to `if non_owned:` (an unowned target can never auto-confirm).
+        from agent_cascade import settings
+        _preview = ''
+        if non_owned and (settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL or settings.TOOL_AUTO_CONFIRM_ENABLED):
+            _preview = self._affected_files_preview(targets, f'delete {len(targets)} target(s)')
+        # BUG_0425: auto-confirm is structurally unreachable here (non_owned implies a target _get_owner says isn't owned by agent_name, which is the same check preview_auto_confirms fails on), so this branch only ever escalates — it can never auto-confirm a non-owned delete. Kept so a future _is_auto_approved refactor doesn't silently depend on it firing.
+        _auto_ok = bool(_preview) and self.preview_auto_confirms(
+            preview=_preview, affected_paths=targets, agent_name=agent_name)
+        if non_owned and not _auto_ok:
             # _build_delete_approval_description returns ONLY the scope summary (no
             # justification) so we can append the agent's reason exactly once here.
             description = self._build_delete_approval_description(targets, non_owned)
@@ -3826,6 +3927,7 @@ class FileOpsMixin:
                 tool_name='delete_file',
                 tool_args=self._approval_args(preview=_compact_delete_view),
                 description=description,
+                preview=(_preview if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL else ''),
             )
             if not approved:
                 return f"REJECTED: {reason}"
@@ -4163,8 +4265,13 @@ class FileOpsMixin:
 
     # ─── Copy file ────────────────────────────────────────────────────────
 
-    def copy_file(self, source: str, destination: str, agent_name: str, justification: str = '') -> str:
-        """Copy a file — auto-approved if destination is new or agent-owned."""
+    def copy_file(self, source: str, destination: str, agent_name: str, justification: str = '',
+                  dry_run: bool = False) -> str:
+        """Copy a file — auto-approved if destination is new or agent-owned.
+
+        dry_run=True (BUG_0425) returns an affected-files + sizes preview WITHOUT copying,
+        backing up, or requesting approval. Off (default) is unchanged.
+        """
         try:
             src_path = self._resolve_path(source, mode='ro')
             self._resolve_path(destination, mode='rw')  # validate destination is writable (side effect)
@@ -4173,13 +4280,24 @@ class FileOpsMixin:
         if not src_path.exists():
             return f"Source not found: {source}"
 
+        if dry_run:
+            return self._affected_files_preview(
+                [src_path, self._resolve_path(destination, mode='rw')], 'would copy')
+
+        _preview = ''
         if not self._is_auto_approved(destination, agent_name, creating_new=True):
-            description = f"Copy: {source} → {destination}"
+            # BUG_0425: preview/auto-confirm. Flags off ⇒ _preview stays '' and the request
+            # below is byte-identical to before (preview kwarg defaults to '').
+            from agent_cascade import settings
+            if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL or settings.TOOL_AUTO_CONFIRM_ENABLED:
+                _preview = self._affected_files_preview(
+                    [src_path, self._resolve_path(destination, mode='rw')], 'copy')
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='copy_file',
                 tool_args=self._approval_args(),
-                description=description,
+                description=f"Copy: {source} → {destination}",
+                preview=(_preview if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL else ''),
             )
             if not approved:
                 return f"REJECTED: {reason}"
@@ -4267,8 +4385,13 @@ class FileOpsMixin:
 
     # ─── Move file ────────────────────────────────────────────────────────
 
-    def move_file(self, source: str, destination: str, agent_name: str, justification: str = '') -> str:
-        """Move a file — auto-approved if source is agent-owned."""
+    def move_file(self, source: str, destination: str, agent_name: str, justification: str = '',
+                  dry_run: bool = False) -> str:
+        """Move a file — auto-approved if source is agent-owned.
+
+        dry_run=True (BUG_0425) returns an affected-files + sizes preview WITHOUT moving,
+        backing up, unlinking, or requesting approval. Off (default) is unchanged.
+        """
         try:
             src_path = self._resolve_path(source, mode='rw')
             self._resolve_path(destination, mode='rw')  # validate destination is writable (side effect)
@@ -4277,13 +4400,24 @@ class FileOpsMixin:
         if not src_path.exists():
             return f"Source not found: {source}"
 
+        if dry_run:
+            return self._affected_files_preview(
+                [src_path, self._resolve_path(destination, mode='rw')], 'would move')
+
+        _preview = ''
         if not self._is_auto_approved(source, agent_name):
-            description = f"Move: {source} → {destination}"
+            # BUG_0425: preview/auto-confirm. Flags off ⇒ _preview stays '' and the request
+            # below is byte-identical to before (preview kwarg defaults to '').
+            from agent_cascade import settings
+            if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL or settings.TOOL_AUTO_CONFIRM_ENABLED:
+                _preview = self._affected_files_preview(
+                    [src_path, self._resolve_path(destination, mode='rw')], 'move')
             approved, reason = self.request_user_approval(
                 agent_name=agent_name,
                 tool_name='move_file',
                 tool_args=self._approval_args(),
-                description=description,
+                description=f"Move: {source} → {destination}",
+                preview=(_preview if settings.TOOL_PREVIEW_ATTACHED_TO_APPROVAL else ''),
             )
             if not approved:
                 return f"REJECTED: {reason}"
