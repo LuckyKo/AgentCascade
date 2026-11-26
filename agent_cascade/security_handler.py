@@ -51,6 +51,12 @@ SECURITY_LOCK_ACQUIRE_TIMEOUT_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_LO
 # is-activity-relative.md, Trap 3).
 SECURITY_CHECK_INACTIVITY_WINDOW_SECONDS = int(os.getenv('AGENT_CASCADE_SECURITY_INACTIVITY_WINDOW', 300))
 
+# Max characters of the BUG_0425 dry-run preview appended to the guard's prompt (BUG_0429).
+# Pure safety bound: a large diff must not bloat the guard's single-review prompt. The preview
+# block is only ever appended when ap['preview'] is non-empty (i.e. the preview-attach flag is
+# ON), so with the feature off this value is unused and the guard prompt is byte-identical.
+SECURITY_PREVIEW_MAX_CHARS = 4000
+
 # ── Module-level helpers used by the security handler ───────────────────────
 
 
@@ -646,6 +652,17 @@ class SecurityAdvisorHandler:
                     os_info=f"{platform.system()} {platform.release()}",
                     workspace_info=workspace_info,
                 )
+
+                # BUG_0429: surface the BUG_0425 dry-run preview to the guard — the same concrete
+                # effect shown to the human approver — so a guard that does most of the approving
+                # judges the real diff, not just the declared args. Naturally config-gated:
+                # ap['preview'] is only non-empty when the preview-attach flag is ON, so with the
+                # feature off nothing is appended and the prompt stays byte-identical.
+                preview = (ap.get('preview') or '').strip()
+                if preview:
+                    prompt += ('\n\n[CONCRETE EFFECT PREVIEW (dry-run; NOT yet committed)]\n'
+                               + preview[:SECURITY_PREVIEW_MAX_CHARS]
+                               + ('\n…(truncated)' if len(preview) > SECURITY_PREVIEW_MAX_CHARS else ''))
 
                 # Create engine INSIDE the lock (prevents lifecycle collisions)
                 engine = ExecutionEngine(self.agent_pool)
