@@ -26,7 +26,7 @@ from agent_cascade.settings import (
     COMPRESSION_MIN_USAGE_PCT, COMPRESSION_REVIEW_MAX_RETRIES, COMPRESSION_SECURITY_CHECK_TIMEOUT, COMPRESSION_TIMEOUT, COMPRESSION_WARNING_THRESHOLD,
     DEFAULT_AUTO_SKILL_MODE, DEFAULT_COMPRESSION_CONTEXT_RESERVE_TOKENS, DEFAULT_COMPRESSION_COOLDOWN_SECONDS,
     DEFAULT_COMPRESSION_MAX_ATTEMPTS, DEFAULT_COMPRESSION_PROACTIVE_THRESHOLD, DEFAULT_LOAD_SKILL_MODE,
-    DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, DISMISS_THREAD_JOIN_TIMEOUT, EFFORT_LEVEL_DEFAULT, MAX_CLI_AGENT_CHILDREN, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS,
+    DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET, DISMISS_THREAD_JOIN_TIMEOUT, EFFORT_LEVEL_DEFAULT, MAX_CLI_AGENT_CHILDREN, SAFE_MODE_AUTO_RAM_FLOOR_MB, SAFE_MODE_AUTO_VRAM_FLOOR_MB, SKILL_BANDIT_WEIGHT, SKILL_SELECTOR_MODE_KEYWORD, SOFT_TURN_LIMIT, STREAM_MAX_SILENCE_SECONDS,
     STREAM_MAX_TOTAL_SECONDS, SYSTEM_AGENT_IDLE_TIMEOUT, TOOL_LOOP_DETECTION_ENABLED, TOOL_LOOP_SIM_THRESHOLD,
     LOOP_EXACT_ROLLBACK_ENABLED, LOOP_FUZZY_WARNING_ENABLED, TOOL_LOOP_FUZZY_ROLLBACK_ENABLED,
     UNLOAD_UNUSED_TOOLS_POST_COMPRESSION)
@@ -1070,6 +1070,10 @@ class PoolSettings:
     user_message_log_enabled: bool = True
     auto_skill_min_turns: int = AUTO_SKILL_MIN_TURNS  # Min turns effectuated before a natural finish triggers auto-skill reflection (strictly-greater gate)
     auto_skill_extra_turns: int = AUTO_SKILL_EXTRA_TURNS  # Fresh turn budget granted at in-loop trigger time for reflection
+    # Skill-hint Thompson-Sampling bandit (BUG_0417): master toggle + blend weight [0,1]. 0.0 = OFF
+    # (default, byte-identical precision path); >0 enables the rank-only bandit re-rank LIVE via
+    # config_handlers.apply_skill_bandit_weight (patches memory_hint.manager.SKILL_BANDIT_WEIGHT).
+    skill_bandit_weight: float = SKILL_BANDIT_WEIGHT
     # AUTO Skill Helper sub-mode (only applies when default_load_skill_mode == "AUTO"):
     #   "basic"    — keyword-only matching via resolve_load_skill() (existing behavior)
     #   "advanced" — invokes the Skill Advisor (Security agent) for semantic matching + validation

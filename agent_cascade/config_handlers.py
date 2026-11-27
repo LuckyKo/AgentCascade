@@ -1107,6 +1107,33 @@ def _handle_compression_review_max_retries(ui_cfg: dict, agent_pool: Optional[An
         apply_compression_review_max_retries(val)
 
 
+def apply_skill_bandit_weight(value: float) -> None:
+    """Live-patch the skill-hint bandit weight into its consumer namespace (BUG_0417).
+
+    memory_hint/manager.py imports ``SKILL_BANDIT_WEIGHT`` via a module-level
+    ``from settings import`` (read at manager.py:1053/1523/1546), NOT ``pool.settings``,
+    so a live UI save must patch that module attribute to take effect without a restart.
+    Imported lazily to avoid an import cycle. Used by the handler below and the
+    api_server boot sync (seam #10).
+    """
+    import agent_cascade.memory_hint.manager as _mgr
+    _mgr.SKILL_BANDIT_WEIGHT = value
+
+
+@register_config_handler('skill_bandit_weight')
+def _handle_skill_bandit_weight(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
+    """Clamp to 0.0..1.0 and live-apply the skill-hint bandit weight.
+
+    Clamp is 0-tolerant — ``max(0.0, …)``: 0.0 is the default meaning "bandit off"
+    (byte-identical precision path). Any value >0 enables the rank-only bandit (the
+    SKILL_BANDIT_CONTROLLER knob stays OFF ⇒ admit-all / demote-only).
+    """
+    if agent_pool is not None and hasattr(agent_pool, 'settings'):
+        val = max(0.0, min(1.0, float(ui_cfg.get('skill_bandit_weight', 0.0))))
+        agent_pool.settings.skill_bandit_weight = val
+        apply_skill_bandit_weight(val)
+
+
 @register_config_handler('compression_proactive_threshold')
 def _handle_compression_proactive_threshold(ui_cfg: dict, agent_pool: Optional[Any], agents: list) -> None:
     if agent_pool is not None and hasattr(agent_pool, 'settings'):

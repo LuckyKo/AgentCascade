@@ -3188,6 +3188,10 @@ if __name__ == '__main__':
     from agent_cascade.config_handlers import apply_compression_review_max_retries
     apply_compression_review_max_retries(
         getattr(agent_pool.settings, 'compression_review_max_retries', 2))
+    # BUG_0417: live-apply the persisted skill-hint bandit weight into memory_hint.manager's
+    # module namespace (same import-time-copy concern as compression_review_max_retries above).
+    from agent_cascade.config_handlers import apply_skill_bandit_weight
+    apply_skill_bandit_weight(getattr(agent_pool.settings, 'skill_bandit_weight', 0.0))
 
     # Apply CLI/env overrides via config handlers (before any WebSocket connections exist).
     # Uses handlers directly for validation and consistency with runtime updates.

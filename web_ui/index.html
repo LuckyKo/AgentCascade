@@ -820,6 +820,10 @@
                           <span title="How many times a skill must be hinted in a session before it is auto-loaded into context (when Auto-Load is enabled). Clamped 1–10; lower loads sooner, higher is more conservative.">Auto-Load After N Hints</span>
                           <input autocomplete="off" type="number" id="setting-skill-autoload-threshold" min="1" max="10" step="1" value="3" />
                         </label>
+                        <label class="setting-field">
+                          <span title="Skill-hint Thompson-Sampling bandit weight [0,1]. 0 = off (default; unchanged precision re-rank). Values >0 enable the rank-only bandit re-rank LIVE (no restart).">Skill Bandit Weight (0 = off)</span>
+                          <input autocomplete="off" type="number" id="setting-skill-bandit-weight" min="0" max="1" step="0.1" value="0.0" />
+                        </label>
                       </div>
                     </details>
 
