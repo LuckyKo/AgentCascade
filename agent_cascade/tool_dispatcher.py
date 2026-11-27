@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 from agent_cascade.agent_instance import ACTIVE_STATES
 from agent_cascade.exceptions import AgentTerminatedError
 from agent_cascade.log import logger
+from agent_cascade.slot_yield_utils import yield_caller_slot
 
 # Tail-inclusive DMS shield margin for call_cli_agent: the enforced wall-clock is the CLI timeout
 # PLUS the kill+persist teardown tail (_kill_container is capped at 15s), so the holder-DMS shield
@@ -913,15 +914,21 @@ class ToolDispatcher:
 
         sync_path_start = time.monotonic()
 
-        # Release caller's slot so the child can acquire it inside engine.run()
-        if caller_slot_holder and hasattr(caller_slot_holder,
-                                          '_slot_release') and caller_slot_holder._slot_release is not None:
-            logger.debug(
-                f"[SLOT_SYNC_RELEASE] Releasing slot for '{caller_name}' before running sync child '{instance_name}'")
-            # Structured drop-handoff event (sticky slot plan change #10): parent yields its
-            # slot so the sync child can acquire at FIFO tail; parent re-acquires at tail after.
-            self.engine._release_slot(caller_slot_holder, caller_name, 'sync child', action='drop-handoff')
-            logger.debug(f"[SLOT_SYNC_RELEASE] Slot released for '{caller_name}', active agents can now acquire")
+        # Release the caller's slot so the child can acquire it inside engine.run().
+        # Routed through the shared three-path helper (slot_yield_utils.yield_caller_slot),
+        # the same vetted pattern used by Security/Compressor yields: a normal yield when
+        # the caller holds a live _slot_release, a force-release when the callback was
+        # cleared but the pool still lists the caller as a holder (leaked/phantom permit),
+        # and a skip when there is nothing to yield. save_fn is None deliberately:
+        # _save_parent_state_before_delegation already persisted the parent KV earlier in
+        # dispatch, so passing a save callback here would double-save.
+        _yielded = yield_caller_slot(
+            self.pool, self.engine, caller_slot_holder, caller_name,
+            log_prefix='SLOT_SYNC_YIELD',
+            release_reason='sync child',
+            before_action=f"sync child '{instance_name}'",
+            save_fn=None,
+        )
 
         try:
             # Unified core execution — handles loop detection, status checks, formatting
@@ -968,36 +975,44 @@ class ToolDispatcher:
             return f"[Agent '{instance_name}' Failed]:\n{format_crash(e)}"
 
         finally:
-            # FIX 3: Always re-acquire caller's slot, even on early exit due to stop.
-            # Shared yield/reacquire helper: re-acquires via bounded FIFO AND restores the
-            # caller's KV onto the endpoint it ACTUALLY holds (never the stale
-            # _last_endpoint_config — a live bug this path had), clearing the orphaned label
-            # on every skip path. tolerate_failure=False preserves today's raise-on-hard-failure
-            # semantics; only the restore target and label handling change.
-            logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
-            # respect_toggle=False: this is a NORMAL-delegation return (parent → sync child → parent),
-            # NOT a system-agent yield. Its warm-cache restore must ALWAYS run regardless of the
-            # State KV Save/Restore UI toggle — that toggle only gates Security/Compressor yields.
-            # The save side (_save_parent_state_before_delegation) is already ungated, so gating
-            # only this restore would drop a saved-but-never-restored state and force reprocess.
+            # Re-acquisition is gated on whether the slot was actually yielded above. On
+            # the yielded path, re-acquire via the shared helper: bounded FIFO re-take plus
+            # KV restore onto the endpoint the caller ACTUALLY holds (never the stale
+            # _last_endpoint_config), clearing the orphaned label on every skip path.
+            # tolerate_failure=False preserves today's raise-on-hard-failure semantics;
+            # respect_toggle=False: this is a NORMAL-delegation return (parent -> sync child
+            # -> parent), NOT a system-agent yield, so its warm-cache restore must always run
+            # regardless of the State KV Save/Restore UI toggle (that toggle only gates
+            # Security/Compressor yields). The save side
+            # (_save_parent_state_before_delegation) is already ungated.
             #
-            # Parallel-call_agent batch optimization (plan §10.3): only the LAST child of a SYNC batch
-            # needs to swap the parent model back in. A non-last child re-acquires its slot (keeping the
-            # FIFO permit accounting and the next child's _slot_release gate intact) but DEFERS the KV
-            # restore via defer_kv_restore=True, leaving _state_label pending so the last child's full
-            # restore consumes it (and a mid-batch early exit self-heals at the next _setup_turn). is_last_ca
-            # is decided by BATCH POSITION (computed once by the dispatch loop), NOT by which child actually
-            # ran — so a terminated non-last child does not change the determination, and a terminated last
-            # child still runs its full restore in this finally.
-            if is_last_ca:
-                self.engine.reacquire_after_slot_yield(
-                    caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False)
+            # Parallel-call_agent batch optimization: only the LAST child of a SYNC batch
+            # needs to swap the parent model back in. A non-last child re-acquires its slot
+            # (keeping FIFO permit accounting and the next child's _slot_release gate intact)
+            # but DEFERS the KV restore via defer_kv_restore=True, leaving _state_label
+            # pending so the last child's full restore consumes it (a mid-batch early exit
+            # self-heals at the next _setup_turn). is_last_ca is decided by BATCH POSITION
+            # (computed once by the dispatch loop), NOT by which child actually ran.
+            if _yielded:
+                logger.debug(f"[SLOT_SYNC_REACQUIRE] Attempting to re-acquire slot for '{caller_name}' after sync child")
+                if is_last_ca:
+                    self.engine.reacquire_after_slot_yield(
+                        caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False)
+                else:
+                    self.engine.reacquire_after_slot_yield(
+                        caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False,
+                        defer_kv_restore=True)
+                logger.debug(f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{caller_name}'. "
+                             f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
             else:
-                self.engine.reacquire_after_slot_yield(
-                    caller_slot_holder, caller_name, 'sync child', tolerate_failure=False, respect_toggle=False,
-                    defer_kv_restore=True)
-            logger.debug(f"[SLOT_SYNC_REACQUIRED] Re-acquired slot for '{caller_name}'. "
-                         f"Total SYNC path elapsed: {time.monotonic() - sync_path_start:.2f}s")
+                # Nothing was yielded (skip path, or the force-release did not take), so the
+                # parent owns no slot to re-acquire — re-acquiring anyway could self-deadlock
+                # on a phantom-held permit. Re-stamp activity so a long child run does not
+                # leave the parent looking wedged to the holder-DMS; any pending _state_label
+                # self-heals at the next _setup_turn.
+                self.pool._mark_activity(caller_name)
+                logger.debug(f"[SLOT_SYNC_REACQUIRE] no yield for '{caller_name}' — "
+                             f"no re-acquire; activity re-stamped")
 
     def _run_child_async(self, caller_name: str, function_id: Optional[str], agent_class: str, instance_name: str,
                          args: dict, child_depth: int) -> str:

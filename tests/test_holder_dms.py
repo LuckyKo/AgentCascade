@@ -859,3 +859,29 @@ class TestPostReturnRestampSyncTool:
 
 if __name__ == '__main__':
     unittest.main()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8 — BUG_0430: a yielded holder is not terminated; a still-held one still is
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestSyncChildYieldDmsInvariant:
+    def test_yielded_holder_not_terminated(self):
+        """After the sync-child yield releases the parent's conc=0 permit, the parent is
+        no longer a pool holder, so the holder-DMS terminates NOTHING. This is exactly the
+        self-kill BUG_0430 prevents: the old code left the parent as the sole holder while
+        the advisor waited, and the ~300s DMS fired."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        im, pool, slot_pool, release = _build(inst)
+        release()  # the parent yielded its slot before the child/advisor acquired
+        assert 'H' not in slot_pool._running, 'yield did not remove the holder'
+        im._run_holder_dms()
+        assert pool.terminated == [], f'non-holder wrongly terminated: {pool.terminated}'
+
+    def test_still_held_old_activity_still_terminated(self):
+        """Complement / not-weakened guard: if the slot was NOT yielded and the holder has
+        made no turn-progress past the window, the DMS must STILL terminate it. Removing the
+        fix must not turn the DMS into a no-op for genuine wedges."""
+        inst = _FakeInst('H', last_activity=_old(), llm_activity=_old(), llm_active=False)
+        im, pool, _, _ = _build(inst)  # holder still granted
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f'held wedged holder not terminated: {pool.terminated}'

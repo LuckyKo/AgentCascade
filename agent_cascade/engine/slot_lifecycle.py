@@ -71,7 +71,9 @@ class SlotLifecycleMixin:
             # logs nothing.
             self._discard_stale_permit(instance, instance.instance_name,
                                        context=f'slot re-acquire ({context})', action='drop-stale-reacquire')
-            instance._slot_release = self.pool._acquire_slot(instance.agent_class, instance.instance_name)
+            instance._slot_release = self.pool._acquire_slot(
+                instance.agent_class, instance.instance_name,
+                slot_acquire_timeout=getattr(instance, '_slot_acquire_timeout', None))
             # Store slot key for diagnostics. Cursor-aware resolution (sticky slot
             # plan change #6): the key must match the endpoint pool that
             # _acquire_slot actually acquired (chain rotated by this instance's

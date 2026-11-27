@@ -208,20 +208,20 @@ class TestProductionCallersUseSharedHelper:
             'compression/consolidation must NOT route a KV save — the context is rewritten')
         assert 'save_fn=' not in helper_src, 'save_fn kwarg must be omitted so it defaults to None'
 
-    def test_tool_dispatcher_is_a_separate_unconditional_path(self):
-        """DISCREPANCY NOTE (do not patch): tool_dispatcher's sync-child path does NOT
-        route through yield_caller_slot. It releases directly via
-        ``engine._release_slot(...)`` gated on ``_slot_release is not None``, and
-        re-acquires UNCONDITIONALLY in its finally block — a separate, already-
-        unconditional release path with no caller-side KV save. The single Path-3 fix
-        therefore covers only security_handler + compression/agent_invoker; this test
-        documents that tool_dispatcher is intentionally NOT part of the shared helper."""
-        from agent_cascade import tool_dispatcher
-        src = inspect.getsource(tool_dispatcher)
-        assert 'yield_caller_slot' not in src, (
-            'tool_dispatcher must NOT route through yield_caller_slot — it uses its own '
-            'direct _release_slot + unconditional reacquire path'
-        )
-        # It releases directly and re-acquires unconditionally.
-        assert '_release_slot(' in src
+    def test_tool_dispatcher_sync_child_routes_through_shared_helper(self):
+        """tool_dispatcher's sync-child path routes the caller-slot release through the
+        shared yield_caller_slot three-path helper (BUG_0430): a leaked/phantom permit is
+        force-released, not just a live _slot_release. It passes save_fn=None (the parent
+        KV is already saved by _save_parent_state_before_delegation), and gates the finally
+        re-acquire on _yielded — the non-yield path re-stamps activity via pool._mark_activity
+        instead of re-acquiring (a phantom-held permit would otherwise self-deadlock)."""
+        from agent_cascade.tool_dispatcher import ToolDispatcher
+        src = inspect.getsource(ToolDispatcher._run_child_sync)
+        assert 'yield_caller_slot(' in src, (
+            'sync-child release must route through the shared yield_caller_slot helper')
+        assert 'save_fn=None' in src, (
+            'sync-child yield must pass save_fn=None (parent KV saved earlier; no double-save)')
+        assert '_mark_activity(' in src, (
+            'non-yield path must re-stamp activity instead of re-acquiring')
+        # The yielded path still re-acquires via the shared engine helper (not a no-op).
         assert 'reacquire_after_slot_yield(' in src

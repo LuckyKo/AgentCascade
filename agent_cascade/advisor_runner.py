@@ -26,6 +26,27 @@ import agent_cascade.security_reuse as security_reuse
 # preventing the LLM from continuing to execute tool calls after its answer.
 _VERDICT_RE = re.compile(r'\[VERDICT\]\s*(APPROVE|DENY)', re.IGNORECASE)
 
+# Fraction of holder_dms_window_s the advisor's INITIAL slot acquire may consume. The
+# parent's last_activity is frozen while the advisor blocks on the shared endpoint slot on
+# this thread, so the acquire bound MUST stay strictly below the DMS window; 0.5 leaves
+# margin for jitter. Keep strictly < 1.0.
+_ADVISOR_ACQUIRE_DMS_FRACTION = 0.5
+
+
+def _compute_advisor_acquire_timeout(first_yield_timeout: float, holder_dms_window_s: float) -> float:
+    """Advisor's INITIAL slot-acquire wait (seconds), strictly below the holder-DMS window.
+
+    The advisor runs synchronously on the caller's thread: while it blocks on the shared
+    endpoint slot the parent's last_activity is frozen and the holder-DMS can fire at its own
+    window. The bound is the smaller of first_yield_timeout and a fixed fraction of the DMS
+    window, floored at 1.0s; with the fraction < 1.0 it is always strictly below the window
+    for any positive window. Honored as a plain fixed wait by pool/slots._acquire_slot.
+    """
+    bound = float(first_yield_timeout)
+    if holder_dms_window_s > 0:
+        bound = min(bound, float(holder_dms_window_s) * _ADVISOR_ACQUIRE_DMS_FRACTION)
+    return max(1.0, bound)
+
 
 @dataclass
 class AdvisorResult:
@@ -199,6 +220,11 @@ def run_lightweight_advisor(
             # Opt the instance out of the live UI per-agent map (see the gate in
             # engine/helpers._get_active_functions_from_template).
             instance._exclusive_disabled_tools = True
+
+        # Bound the initial slot-acquire below the DMS window; see _compute_advisor_acquire_timeout.
+        _dms_window = float(getattr(pool.settings, 'holder_dms_window_s', 0.0) or 0.0)
+        instance._slot_acquire_timeout = _compute_advisor_acquire_timeout(
+            first_yield_timeout, _dms_window)
 
         # ── 5. First-yield timeout guard (threading.Timer + Event) ───────────
         first_yield_timer = threading.Timer(first_yield_timeout, _first_yield_timeout_trigger)

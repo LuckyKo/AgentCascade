@@ -414,6 +414,8 @@ class AgentInstance:
         [], None]] = None  # Callback to release the endpoint concurrency slot when transitioning to SLEEPING or exiting
     _slot_key: Optional[
         str] = None  # Slot key of currently held SlotPool slot ('_shared_sequential_slot_' for conc=0, or normalized api_base)
+    _slot_acquire_timeout: Optional[
+        float] = None  # Per-instance override for the INITIAL slot-acquire wait (seconds); None = use the pool's live queue window. Set by the transient Skill/Admin advisor so it fails fast strictly below holder_dms_window_s.
     _compression_suspended_at: float = field(
         default=0.0)  # Monotonic timestamp of last compression-halt wait entry (0.0 = never suspended this run)
 

@@ -92,6 +92,17 @@ class SlotsMixin:
             # leave EndpointScheduler.acquire to resolve the module constant instead,
             # which is why the setting would silently never apply.
             _window, _hard_cap = _queue_limits(self)
+            # Per-instance fixed-wait override (transient advisors). When a positive
+            # slot_acquire_timeout is passed, collapse BOTH timeout and hard_cap to
+            # min(window, override): a plain fixed wait that holder activity must NOT
+            # slide, because the caller runs synchronously on a thread whose dead-man's-
+            # switch clock keeps ticking. This lets a lightweight advisor fail fast instead
+            # of converging with the holder-DMS window. Absent -> unchanged live-activity
+            # (window, max(6*window, 60)) behavior.
+            _acquire_override = kwargs.get('slot_acquire_timeout')
+            if _acquire_override is not None and _acquire_override > 0:
+                _fixed_wait = min(_window, float(_acquire_override))
+                _window, _hard_cap = _fixed_wait, _fixed_wait
             return router.scheduler.acquire(
                 api_base, concurrency_limit, instance_name, agent_class, pool=self,
                 endpoint_name=_ep_name, model=_model,

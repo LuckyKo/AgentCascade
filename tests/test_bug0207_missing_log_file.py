@@ -20,6 +20,7 @@ All tests are red-at-HEAD / green-after. No LLM required.
 """
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -177,6 +178,13 @@ class FakePool:
 
     def get_instance(self, n):
         return self.instances.get((n or '').strip())
+
+    def _mark_activity(self, name: str):
+        """Mirrors ``SlotsMixin._mark_activity``: updates last_activity when the instance
+        is present; a guarded no-op when it is gone (the sync non-yield path's caller)."""
+        inst = self.instances.get((name or '').strip())
+        if inst:
+            inst.last_activity = time.monotonic()
 
     def enqueue_message(self, name, text):
         with self._pool_lock:
