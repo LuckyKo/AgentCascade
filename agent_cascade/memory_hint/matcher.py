@@ -31,6 +31,37 @@ W_BODY = 1.0
 # windows so no single huge file dominates the cosine denominator.
 _BODY_CHUNK_CHARS = 512
 
+# BUG_0428: cross-session recall blends recency × importance × relevance so a
+# high-importance lesson can rank above a low-importance one (and, with recency opted in,
+# a high-importance-but-older one above a low-importance-but-recent one).
+#
+# Sane defaults: RELEVANCE 1.0 (base scale unchanged) + IMPORTANCE 0.3 (the active term) +
+# RECENCY 0.0 (opt-in). Recency is OFF by default because a just-created lesson has
+# mtime ≈ now → recency ≈ 1.0, which would add a positive baseline to EVERY candidate and
+# lift weak matches above the gate's self-calibrating floor (a recall regression).
+# Importance is 0 for a never-read lesson, so a fresh vault scores identically to pure
+# cosine (no regression); a frequently-read lesson earns the reordering boost. Weights are
+# relative emphasis (need not sum to 1); the gate's floor is a self-calibrating EWMA.
+DEFAULT_RECALL_WEIGHTS: Dict[str, float] = {'recency': 0.0, 'importance': 0.3, 'relevance': 1.0}
+
+
+def _resolve_weights(weights: Optional[dict]) -> Tuple[float, float, float]:
+    """Return ``(w_recency, w_importance, w_relevance)`` from a weights dict.
+
+    Missing keys fall back to :data:`DEFAULT_RECALL_WEIGHTS`; a non-dict, or a value that
+    does not coerce to ``float``, falls back to the default for that key (never raises).
+    """
+    if not isinstance(weights, dict):
+        weights = {}
+    out = []
+    for key in ('recency', 'importance', 'relevance'):
+        raw = weights.get(key, DEFAULT_RECALL_WEIGHTS[key])
+        try:
+            out.append(float(raw))
+        except (TypeError, ValueError):
+            out.append(DEFAULT_RECALL_WEIGHTS[key])
+    return (out[0], out[1], out[2])
+
 
 def _tokenize(text: str) -> List[str]:
     """Lowercased token list using the shared skill-matcher pattern."""
@@ -138,7 +169,10 @@ class MemoryMatcher:
 
     # ── Matching ─────────────────────────────────────────────────────────────
 
-    def match(self, query: str, allowed_scope: Optional[set] = None) -> List[Tuple[str, float]]:
+    def match(self, query: str, allowed_scope: Optional[set] = None,
+              recency: Optional[Dict[str, float]] = None,
+              importance: Optional[Dict[str, float]] = None,
+              weights: Optional[dict] = None) -> List[Tuple[str, float]]:
         """Score every document against ``query``. Returns ``(rel_path, cosine)`` desc.
 
         The query vector uses the body scale (W_BODY) only — no identity boost on
@@ -179,6 +213,14 @@ class MemoryMatcher:
                 s.strip().lower() for s in allowed_scope if isinstance(s, str) and s.strip()
             )
 
+        # BUG_0428: blend recency + importance into the cosine relevance score ONLY when
+        # the caller supplies at least one of them. With both None the score is the pure
+        # cosine (byte-identical to the pre-BUG_0428 behaviour) so existing recall never
+        # regresses. A doc must have cosine > 0 to be surfaced (importance/recency only
+        # reorder *relevant* docs); missing per-doc values default to 0.0 (no signal).
+        blend = (recency is not None) or (importance is not None)
+        w_rec, w_imp, w_rel = _resolve_weights(weights) if blend else (0.0, 0.0, 1.0)
+
         results: List[Tuple[str, float]] = []
         for rel_path, doc in self._docs.items():
             if allowed is not None and 'global' not in doc['scope'] and not (doc['scope'] & allowed):
@@ -195,8 +237,13 @@ class MemoryMatcher:
                 if other:
                     dot += w * other
             score = dot / (q_norm * doc['norm'])
-            if score > 0.0:
-                results.append((rel_path, score))
+            if score <= 0.0:
+                continue
+            if blend:
+                r_val = recency.get(rel_path, 0.0) if recency is not None else 0.0
+                i_val = importance.get(rel_path, 0.0) if importance is not None else 0.0
+                score = w_rec * r_val + w_imp * i_val + w_rel * score
+            results.append((rel_path, score))
 
         results.sort(key=lambda x: (-x[1], x[0]))
         return results

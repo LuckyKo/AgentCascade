@@ -1383,6 +1383,25 @@ MEMORY_BANDIT_THETA_MAX: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_TH
 #   dedicated knob (memories have no precision-floor setting) avoids coupling memory tuning
 #   to the skill's demote floor; default identical (0.35).
 MEMORY_BANDIT_M_FLOOR: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_M_FLOOR', '0.35'))
+# ── Cross-session recall scoring (recency × importance × relevance, BUG_0428) ──
+# Weights for the memory-hint candidate blend: score = w_rec·recency + w_imp·importance
+# + w_rel·relevance (memory_hint/matcher.py). Relevance stays at 1.0 (base scale
+# unchanged); importance (0.3) is the active default term; recency is OFF by default
+# (0.0, opt-in) because a just-created lesson has mtime ≈ now → recency ≈ 1.0, which
+# would lift weak matches above the gate's self-calibrating floor (a recall regression).
+# Importance is 0 for a never-read lesson, so a fresh vault scores like pure cosine.
+MEMORY_HINT_RECALL_WEIGHTS = {
+    'recency': float(os.getenv('AGENT_CASCADE_MEMORY_HINT_RECALL_W_RECENCY', '0.0')),
+    'importance': float(os.getenv('AGENT_CASCADE_MEMORY_HINT_RECALL_W_IMPORTANCE', '0.3')),
+    'relevance': float(os.getenv('AGENT_CASCADE_MEMORY_HINT_RECALL_W_RELEVANCE', '1.0')),
+}
+# Recency normalization half-life (days): recency = 0.5 ** (age_days / half_life). A
+# lesson modified within the half-life scores ≥0.5 recency; older decays geometrically.
+MEMORY_HINT_RECENCY_HALF_LIFE_DAYS: float = float(
+    os.getenv('AGENT_CASCADE_MEMORY_HINT_RECENCY_HALF_LIFE_DAYS', '14.0'))
+# Importance normalization scale: importance = min(1.0, (reads + hints) / scale). A
+# lesson read/hinted `scale`+ times reaches max importance (1.0).
+MEMORY_HINT_IMPORTANCE_SCALE: int = int(os.getenv('AGENT_CASCADE_MEMORY_HINT_IMPORTANCE_SCALE', '5'))
 
 # Same-turn, opportunistic hint delivery. ON by default, but the feature still stays off
 # unless llm_cfg 'memory_hint_enabled' is set — this flag only selects inline vs deferred

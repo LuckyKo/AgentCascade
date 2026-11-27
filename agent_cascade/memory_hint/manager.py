@@ -1244,6 +1244,44 @@ class MemoryHintManager:
                 logger.info('[MEMORY_HINT] %s: auto-loaded repeatedly-hinted skill %r '
                             '(status=%s, hints=%d)', name, n, status, skill_counts.get(n, 0))
 
+    def _recall_signals(self):
+        """BUG_0428: build the recency + importance maps + weights for the cross-session
+        recall blend (memory_hint/matcher.py).
+
+        * recency — ``0.5 ** (age_days / half_life)`` per lesson, from each vault index's
+          file mtime (a recently-acted-on signal).
+        * importance — ``min(1.0, (reads + hints) / scale)`` per lesson, from the merged
+          ledger mirror (load-hit frequency).
+
+        Missing values → 0.0 (no signal). Best-effort: any failure yields empty maps so
+        the blend degrades to pure relevance (never raises into the recall pipeline).
+        """
+        weights = dict(settings.MEMORY_HINT_RECALL_WEIGHTS)
+        recency: Dict[str, float] = {}
+        importance: Dict[str, float] = {}
+        try:
+            half_life = float(settings.MEMORY_HINT_RECENCY_HALF_LIFE_DAYS)
+            scale = float(settings.MEMORY_HINT_IMPORTANCE_SCALE)
+            now = time.time()
+            with self._index_lock:
+                for _root, idx in self._vault_indexes.items():
+                    for rel, mtime in idx.mtimes.items():
+                        age_days = max(0.0, (now - mtime) / 86400.0)
+                        recency[rel] = 0.5 ** (age_days / half_life) if half_life > 0 else 0.0
+            if not self._memory_stats_ready:
+                self._refresh_memory_stats()
+            with self._memory_bandit_lock:
+                stats = dict(self._memory_stats)
+            if scale > 0:
+                for rel, entry in stats.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    hits = int(entry.get('reads', 0) or 0) + int(entry.get('hints', 0) or 0)
+                    importance[rel] = min(1.0, hits / scale)
+        except Exception as e:  # noqa: BLE001 — best-effort: degrade to pure relevance
+            logger.debug('[MEMORY_HINT] recall signals failed: %s', e)
+        return recency, importance, weights
+
     def _match_memories(self, job: dict, settings: dict, inst) -> 'tuple[List[str], List[str]]':
         """Memory sub-pipeline: the existing specificity gate over the lesson index.
 
@@ -1263,8 +1301,10 @@ class MemoryHintManager:
         # snapshot (not the live dict) so a concurrent rescan can't change iteration
         # order or drop a vault between scoring and display — keeping "first vault wins"
         # consistent between the scored file and the displayed absolute path.
+        recency, importance, recall_weights = self._recall_signals()
         with self._index_lock:
-            matches = self._matcher.match(query)
+            matches = self._matcher.match(query, recency=recency, importance=importance,
+                                          weights=recall_weights)
             roots_snapshot = list(self._vault_indexes.keys())
         if not matches:
             # Log only the query length — never the raw text (sensitive data).
