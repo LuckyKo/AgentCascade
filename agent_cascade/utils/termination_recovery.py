@@ -21,7 +21,7 @@ from agent_cascade.agent_instance import AgentState
 from agent_cascade.log import logger
 
 
-def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
+def rearm_terminated_instance(pool, instance_name: str, origin: str, force: bool = False) -> bool:
     """TERMINATED -> IDLE for a root instance still present in the pool (BUG_0205).
 
     Only re-arms a ROOT instance (``parent_instance is None``) whose loop-termination
@@ -45,11 +45,19 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
     unwound). While it is still parked the re-arm is deferred (returns False); a later user message
     retries. Loop-detector reasons and reason-less terminations are unaffected by this gate.
 
+    BUG_0431: when ``force=True`` (an explicit user-message resume, where pool._run_generation has
+    already been bumped so any parked thread is generation-superseded), the quiescence gate is
+    SKIPPED and a stale ``_in_blocking_tool`` marker is cleared — the durable generation gate, not
+    the marker, is what protects the live run. ``force`` does NOT bypass the reason gate below.
+
     Args:
         pool: The AgentPool (provides ``get_instance``, ``terminated_instances``,
             ``_pool_lock``).
         instance_name: The instance to re-arm.
         origin: Caller label for the log line (e.g. ``"user-message"``).
+        force: Skip the DMS-wedge parked-thread quiescence gate and clear any stale
+            ``_in_blocking_tool`` marker (BUG_0431). Default False preserves BUG_0308 deferral.
+            Does NOT lift the reason gate (a reason-less termination still stays dead).
 
     Returns:
         True when re-armed; False when the instance is absent, is a child (has a
@@ -72,6 +80,13 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
     # Only loop-terminations are recoverable; dismissals/teardowns/Stop leave this unset.
     reason = getattr(inst, '_terminated_reason', None)
     if not isinstance(reason, str) or not reason:
+        # Diagnostic only for a genuinely-dead root: a healthy IDLE instance also has no reason and
+        # returns False on every user message — that is the normal no-op path, not a refusal to log.
+        if getattr(inst, 'is_terminated', False) or getattr(inst, 'state', None) == AgentState.TERMINATED:
+            logger.warning(
+                f"[REARM] '{instance_name}' re-arm REFUSED (reason gate): no recoverable "
+                f"_terminated_reason (value={reason!r}) — 'TERMINATED stays dead' (origin={origin}, force={force})."
+            )
         return False
 
     # BUG_0308: a DMS wedge-termination records a recoverable reason, but the wedged root's
@@ -93,7 +108,9 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
     # returned above, so the "TERMINATED stays dead" contract is unchanged. A genuinely forever-stuck
     # thread correctly stays dead (reviving it would double-run).
     from agent_cascade.pool.idle_manager import is_dms_wedge_reason
-    if is_dms_wedge_reason(reason) and getattr(inst, '_in_blocking_tool', None) is not None:
+    # BUG_0431: ``force`` (user-message resume, _run_generation already bumped) lifts this deferral;
+    # the stale marker is cleared in the reset block below. Without force, defer (BUG_0308).
+    if not force and is_dms_wedge_reason(reason) and getattr(inst, '_in_blocking_tool', None) is not None:
         logger.warning(
             f"[REARM] '{instance_name}' wedge re-arm DEFERRED: parked thread still in blocking tool "
             f"(origin={origin}); will re-arm once it unwinds."
@@ -122,6 +139,13 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str) -> bool:
         # non-loop termination (dismiss / teardown / Stop) must stay dead, so the reason
         # is cleared; a fresh loop termination re-sets it via engine/llm_call.py.
         inst._terminated_reason = None
+        # BUG_0431: a forced (user-message) re-arm discards a possibly-stale _in_blocking_tool
+        # marker. The parked thread is generation-superseded (run_agent_unified bumped
+        # _run_generation before reaching here), so it can't touch the live run's state; the new
+        # run re-sets the marker on tool entry. Only on force — a non-forced re-arm leaves the
+        # marker as-is (prior BUG_0205/0308 behavior: a wedge marker was proven None by the gate).
+        if force:
+            inst._in_blocking_tool = None
 
     with pool._pool_lock:
         pool.terminated_instances.discard(instance_name)

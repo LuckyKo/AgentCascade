@@ -272,5 +272,31 @@ def test_superseded_finalize_does_not_clobber_running_state():
     engine.pool._mark_activity.assert_called_once_with('Main')
 
 
+# ══════════════════════════════════════════════
+# 6. BUG_0431 guard: the default (force=False) path is UNCHANGED — quiescence still defers
+# ══════════════════════════════════════════════
+
+
+def test_default_force_false_still_defers_parked_wedge():
+    """BUG_0431 added a force param; this locks the pre-existing contract that a NON-forced re-arm
+    (the default) still defers a still-parked wedge root, i.e. the quiescence gate is not silently
+    bypassed for callers that do not pass force=True (re-arm helper: `not force` guards the gate)."""
+    inst = _make_root('Main')
+    pool = _Pool(inst)
+    _arm_wedge(inst)
+    IdleManager(pool)._run_holder_dms()
+    assert is_dms_wedge_reason(inst._terminated_reason)
+    assert inst._in_blocking_tool is not None  # parked
+
+    # Default call (no force kwarg) must defer exactly as before BUG_0431.
+    assert rearm_terminated_instance(pool, 'Main', origin='user-message') is False
+    assert inst.state == AgentState.TERMINATED
+    assert inst._in_blocking_tool is not None  # marker left intact on deferral
+
+    # Same setup, forced, succeeds (proves the deferral is the force flag, not the posture).
+    assert rearm_terminated_instance(pool, 'Main', origin='user-message', force=True) is True
+    assert inst.state == AgentState.IDLE
+
+
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-v']))

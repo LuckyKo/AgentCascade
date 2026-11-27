@@ -37,7 +37,11 @@ def _guarded_rearm(pool, instance_name: str) -> bool:
     Returns True on success, False when the re-arm was skipped.
     """
     try:
-        return rearm_terminated_instance(pool, instance_name, origin='user-message')
+        # force=True (BUG_0431): a user-message resume has already bumped pool._run_generation
+        # (run_agent_thread_unified), so any parked DMS-wedge thread is generation-superseded and
+        # cannot touch the live run's state — safe to lift the quiescence deferral of a stale
+        # _in_blocking_tool marker. The reason gate inside still keeps reason-less Stops dead.
+        return rearm_terminated_instance(pool, instance_name, origin='user-message', force=True)
     except Exception as e:
         logger.warning(f'[REARM] skipped for {instance_name}: {e}')
         return False
