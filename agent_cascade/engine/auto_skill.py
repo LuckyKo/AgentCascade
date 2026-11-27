@@ -12,7 +12,8 @@ from __future__ import annotations
 from agent_cascade.llm.schema import ASSISTANT
 from agent_cascade.log import logger
 from agent_cascade.settings import (AUTO_SKILL_ENABLED, AUTO_SKILL_EXTRA_TURNS, AUTO_SKILL_MIN_TURNS,
-                                    DEFAULT_LOAD_SKILL_MODE, LOAD_SKILL_NONE)
+                                    DEFAULT_LOAD_SKILL_MODE, EFFORT_LEVEL_DEFAULT, LOAD_SKILL_NONE,
+                                    effort_suppresses_auto_skill)
 from agent_cascade.utils.utils import extract_text_from_message
 
 
@@ -37,11 +38,17 @@ class AutoSkillMixin:
         gate at the top of _try_auto_skill_extension, so the two can never drift.
         Deliberately excludes auto_skill_qualifies (skill-creator/prompt build) — that is a
         deeper qualification checked later and must not be re-run on every final turn.
+
+        The effort gate lives HERE (not at the trigger sites) so the last-turn prediction
+        and the trigger always agree: only the 'low' notch suppresses reflection, while
+        medium/high/ultra keep it on top of their original-run turn cap.
         """
         skill_manager = getattr(self.pool, 'skill_manager', None)
         if skill_manager is None:
             return False
         settings = getattr(self.pool, 'settings', None)
+        if effort_suppresses_auto_skill(getattr(settings, 'effort_level', EFFORT_LEVEL_DEFAULT)):
+            return False
         if not getattr(settings, 'auto_skill_enabled', AUTO_SKILL_ENABLED):
             return False
         if getattr(settings, 'default_load_skill_mode', DEFAULT_LOAD_SKILL_MODE) == LOAD_SKILL_NONE:

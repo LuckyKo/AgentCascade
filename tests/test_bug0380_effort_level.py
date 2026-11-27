@@ -6,8 +6,10 @@ auto-skill reflection extension cannot silently defeat a capped notch.
 """
 import asyncio
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,6 +25,7 @@ from agent_cascade.settings import (
     SOFT_TURN_LIMIT_ABSOLUTE_MAX,
     normalize_effort_level,
     effort_budgeting_forced_off,
+    effort_suppresses_auto_skill,
     effective_turn_cap,
     effective_soft_limit_cap,
 )
@@ -173,10 +176,6 @@ class _StubLoop:
         from agent_cascade.engine.run_loop import RunLoopMixin
         return RunLoopMixin._effort_max_turns(self, requested)
 
-    def _effort_allows_auto_skill(self):
-        from agent_cascade.engine.run_loop import RunLoopMixin
-        return RunLoopMixin._effort_allows_auto_skill(self)
-
 
 def test_run_loop_entry_clamp():
     for level in ('low', 'medium', 'high'):
@@ -187,16 +186,37 @@ def test_run_loop_entry_clamp():
 
 
 def test_auto_skill_suppression_gate():
-    # CRITICAL: low/med/high suppress the reflection extension, so a run cannot be
-    # silently extended past the notch. ultra preserves existing behavior.
-    for level in ('low', 'medium', 'high'):
-        assert _StubLoop(level)._effort_allows_auto_skill() is False
-    assert _StubLoop('ultra')._effort_allows_auto_skill() is True
-    # Combined invariant: for a capped notch the ceiling holds AND no extension is
-    # granted, so the auto-skill path cannot defeat the cap.
-    stub = _StubLoop('low')
-    assert stub._effort_max_turns(9999) == EFFORT_TURN_CAPS['low']
-    assert stub._effort_allows_auto_skill() is False
+    # Only the 'low' notch suppresses the reflection extension. medium/high/ultra keep
+    # it: their turn cap bounds the ORIGINAL run, and the reflection budget is granted
+    # on top of that. Suppressing it at medium/high too would silently disable skill
+    # generation for anyone who moved the dial off 'ultra'.
+    assert effort_suppresses_auto_skill('low') is True
+    for level in ('medium', 'high', 'ultra'):
+        assert effort_suppresses_auto_skill(level) is False
+
+    # The REAL shared gate — used by both the last-turn tool-disable prediction and the
+    # trigger itself — must agree with the pure helper for every notch, otherwise a low
+    # run keeps tools enabled on its final turn waiting for an extension that never fires.
+    from agent_cascade.execution_engine import ExecutionEngine
+    for level, expected in (('low', False), ('medium', True), ('high', True), ('ultra', True)):
+        pool = MagicMock()
+        pool.skill_manager = MagicMock()          # not None → passes the skill-manager gate
+        ps = PoolSettings()
+        ps.auto_skill_enabled = True
+        ps.default_load_skill_mode = 'AUTO'      # not LOAD_SKILL_NONE
+        ps.effort_level = level
+        pool.settings = ps
+
+        engine = MagicMock(spec=ExecutionEngine)
+        engine.pool = pool
+        engine._auto_skill_gates_met = ExecutionEngine._auto_skill_gates_met.__get__(engine, ExecutionEngine)
+
+        inst = MagicMock()
+        inst._current_turn = ps.auto_skill_min_turns + 1   # strictly-greater turn gate
+        inst._auto_skill_proposed = False                  # one-shot flag not yet set
+        inst._compression_lock = threading.RLock()
+
+        assert engine._auto_skill_gates_met(inst) is expected
 
 
 # ── Nested-depth gate ─────────────────────────────────────────────────────────

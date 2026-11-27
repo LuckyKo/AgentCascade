@@ -59,14 +59,6 @@ class RunLoopMixin:
         re-applied here); low/med/high additionally clamp it down to the notch."""
         return effective_turn_cap(requested, self._effort_level())
 
-    def _effort_allows_auto_skill(self) -> bool:
-        """True when the effort notch permits the auto-skill reflection extension.
-
-        low/med/high suppress it: the notch is the user's chosen effort ceiling, so
-        granting fresh reflection turns would push a capped run past it. ultra leaves
-        the existing extension behavior untouched."""
-        return self._effort_level() == 'ultra'
-
     def run(self, instance: AgentInstance) -> Iterator[Union[List[Message], tuple[List[Message], bool], None]]:
         """Execute the agent's turn loop as a generator yielding state updates.
 
@@ -316,7 +308,7 @@ class RunLoopMixin:
             # FAILED trigger (gates pass but auto_skill_qualifies returns no prompt) this
             # condition is False and control falls through to the normal `yield; continue`
             # below, so the loop exits on the exhausted budget with no flag poisoning.
-            if self._effort_allows_auto_skill() and is_last_original_turn and \
+            if is_last_original_turn and \
                     self._try_auto_skill_extension(
                         instance, messages, llm_messages,
                         loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
@@ -362,7 +354,7 @@ class RunLoopMixin:
                 # and pushes 'post'. See _tg_push_final for dedup/retry semantics.
                 _tg_push_final(instance, response, self.pool,
                                phase='post' if getattr(instance, '_auto_skill_proposed', False) else 'pre')
-                if self._effort_allows_auto_skill() and self._try_auto_skill_extension(
+                if self._try_auto_skill_extension(
                         instance, messages, llm_messages,
                         loaded_skill_names=getattr(instance, '_loaded_skill_names', None)):
                     # Trigger fired (natural completion): grant AUTO_SKILL_EXTRA_TURNS fresh

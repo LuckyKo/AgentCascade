@@ -83,6 +83,17 @@ def effort_budgeting_forced_off(level: str) -> bool:
     return normalize_effort_level(level) == 'ultra'
 
 
+def effort_suppresses_auto_skill(level: str) -> bool:
+    """True only for the 'low' notch: the one notch that forbids the auto-skill
+    reflection extension.
+
+    medium/high/ultra keep the extension — their turn cap bounds the ORIGINAL run and
+    the reflection budget is granted on top, as before. Suppressing it at medium/high
+    too silently disabled skill generation for anyone who moved the dial off 'ultra'.
+    """
+    return normalize_effort_level(level) == 'low'
+
+
 def effective_turn_cap(requested_or_none: Optional[int], effort_level: str) -> int:
     """Clamp a per-call turn budget by the active effort notch.
 
