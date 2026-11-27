@@ -169,21 +169,27 @@ class ACClient:
         return resp.json()
 
     # ── system-command calls (Phase 2) ───────────────────────────
-    # Thin wrappers over the Phase 1 REST endpoints. Token-auth ones follow the
-    # get_status pattern: ensure_token() + one re-handshake on 401. approve/reject
-    # and reset are OPEN endpoints (loopback only); passing the token is harmless,
-    # so we keep the same call shape for simplicity.
+    # Thin wrappers over the Phase 1 REST endpoints. Token-auth ones (including
+    # approve/reject, gated by session_token as of BUG_0420 SEC-02) follow the
+    # get_status pattern via _token_post: ensure_token() + one re-handshake on 401.
+    # reset is the one remaining OPEN command here (loopback only, no token).
 
-    async def _token_post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    async def _token_post(self, path: str, body: Dict[str, Any],
+                          extra_params: Dict[str, Any] = None) -> Dict[str, Any]:
         """POST ``path`` with the session token as a QUERY param; re-handshake once on 401.
 
         The Phase 1 command endpoints read the token from the query string
         (``token: str = None`` in the FastAPI signature), NOT from the JSON body —
         same convention as get_status(). Sending it in the body would 401.
+        ``extra_params`` merges additional query params alongside the token (e.g.
+        ``reject``'s ``reason``); omitted by callers that need only the token.
         """
         for attempt in (1, 2):
             token = (await self.ensure_token())[0]
-            resp = await self._request('POST', path, params={'token': token}, json=body)
+            req_params = {'token': token}
+            if extra_params:
+                req_params.update(extra_params)
+            resp = await self._request('POST', path, params=req_params, json=body)
             if resp.status_code == 401 and attempt == 1:
                 logger.warning('AC %s 401; re-handshaking and retrying once', path)
                 self.invalidate_token()
@@ -233,18 +239,13 @@ class ACClient:
         return await self._token_post(f'/api/stacks/{stack_id}/snapshot', {})
 
     async def approve(self, request_id: str) -> Dict[str, Any]:
-        """POST /api/approve/{request_id} (open endpoint)."""
-        resp = await self._request('POST', f'/api/approve/{request_id}')
-        if resp.status_code != 200:
-            raise ACError(f"/api/approve failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
+        """POST /api/approve/{request_id} (session_token)."""
+        return await self._token_post(f'/api/approve/{request_id}', {})
 
     async def reject(self, request_id: str, reason: str = 'Rejected by user') -> Dict[str, Any]:
-        """POST /api/reject/{request_id}?reason=... (open endpoint)."""
-        resp = await self._request('POST', f'/api/reject/{request_id}', params={'reason': reason})
-        if resp.status_code != 200:
-            raise ACError(f"/api/reject failed ({resp.status_code}): {resp.text[:300]}")
-        return resp.json()
+        """POST /api/reject/{request_id}?reason=... (session_token)."""
+        return await self._token_post(
+            f'/api/reject/{request_id}', {}, extra_params={'reason': reason})
 
     async def stop(self) -> Dict[str, Any]:
         """POST /api/stop (session_token)."""

@@ -2108,14 +2108,18 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         return {'status': 'ok'}
 
     @app.post('/api/approve/{request_id}')
-    async def api_approve(request_id: str):
+    async def api_approve(request_id: str, token: str = None):
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
         if agent_pool and hasattr(agent_pool, 'operation_manager'):
             result = agent_pool.operation_manager.user_approve(request_id)
             return {'status': 'ok', 'result': result}
         return {'status': 'error', 'message': 'No operation manager'}
 
     @app.post('/api/reject/{request_id}')
-    async def api_reject(request_id: str, reason: str = 'Rejected by user'):
+    async def api_reject(request_id: str, reason: str = 'Rejected by user', token: str = None):
+        if not token or token not in api_sessions:
+            return _invalid_token_response()
         if agent_pool and hasattr(agent_pool, 'operation_manager'):
             result = agent_pool.operation_manager.user_reject(request_id, reason)
             return {'status': 'ok', 'result': result}
@@ -2131,8 +2135,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     # ── Authenticated command endpoints (Telegram bridge, Phase 1) ──────────
     # Each is a thin wrapper reusing an existing internal path. All are gated by the
-    # session_token (same check as GET /api/status) — do NOT replicate the open
-    # approve/reject pattern here. Shared stop/auto-security logic lives in
+    # session_token (same check as GET /api/status). approve/reject were formerly
+    # open; as of BUG_0420 SEC-02 they are gated here too, so there is no open
+    # pattern left to replicate. Shared stop/auto-security logic lives in
     # ws_handlers.WsMessageHandler so the WS and REST paths cannot drift.
 
     def _invalid_token_response():
@@ -2460,9 +2465,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         text) additionally stages a human-approve-only cut artifact for any
         CUT_CANDIDATE cohort. Staging NEVER commits/edits dna.py; applying is a
         separate human action via ``POST /api/dna_cohort/approve``. The blocking
-        scan runs off the event loop via asyncio.to_thread. No token: this mirrors
-        ``/api/approve`` (CORS is permissive); the guardrail is the settings-gate +
-        no-auto-commit, not a token."""
+        scan runs off the event loop via asyncio.to_thread. No token by design: CORS
+        is permissive; GET is read-only and POST only stages a human-approve-only
+        cut, so the guardrail is the settings-gate + no-auto-commit, not a token."""
         from . import dna_cohort
         telemetry_dir, workspace_root = _dna_cohort_dirs()
         # GET is strictly read-only by the HTTP method itself (not just body-gated):
@@ -2488,8 +2493,8 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         artifact for ``candidate_hash`` and calls ``apply_approved_cut`` — stages to
         the git INDEX (``git apply --cached``), NO commit unless ``commit: true``. On
         a dirty tree (the common case) it does NOT force; it returns the exact manual
-        command for the human. Never invoked by the periodic loop. Same auth posture
-        as ``/api/approve`` (no token)."""
+        command for the human. Never invoked by the periodic loop. No token by
+        design: the guardrail is the settings-gate + human-only + no-auto-commit."""
         from . import dna_cohort
         candidate_hash = (data or {}).get('candidate_hash')
         commit = bool((data or {}).get('commit'))

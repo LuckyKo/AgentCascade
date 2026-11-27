@@ -1115,7 +1115,7 @@ This means auto-dismissal is **non-destructive**. Only the in-memory state is cl
 
 ### 5.7 Approval & Security Flow
 
-Sensitive tool calls (shell commands, file writes, etc.) are gated by an approval step before execution. The flow lives in `agent_cascade/operation_manager/approval.py`. Each pending approval is registered with a unique `request_id`; the user answers with `/yes` or `/no` (or the WebUI approve/reject controls, backed by `/api/approve/{request_id}` and `/api/reject/{request_id}`).
+Sensitive tool calls (shell commands, file writes, etc.) are gated by an approval step before execution. The flow lives in `agent_cascade/operation_manager/approval.py`. Each pending approval is registered with a unique `request_id`; the user answers with `/yes` or `/no` (or the WebUI approve/reject controls, which send a `type:'approve'`/`type:'reject'` **WebSocket** message handled by `WsMessageHandler` — *not* the `/api/approve`/`/api/reject` REST endpoints, which are a separate, `session_token`-gated path used by programmatic clients).
 
 **AFK auto-reject (server-side):**
 

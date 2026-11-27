@@ -1119,29 +1119,6 @@ class TestEndpointManagementCRUD:
         assert resp.status_code in (200, 400)
 
 
-class TestOperationControl:
-    """Test approve/reject endpoints."""
-
-    def test_post_approve_returns_ok(self, client_no_exceptions):
-        """POST /api/approve/{request_id} returns response without crashing.
-
-        Note: Returns 500 in test setup because operation_manager attribute exists but is None.
-        This is a server-side bug (hasattr check passes, then method call fails on None).
-        With a properly initialized operation_manager, this would return 200.
-        """
-        resp = client_no_exceptions.post('/api/approve/test_request_123')
-        # 200 when operation_manager is properly initialized; 500 due to server bug in test setup
-        assert resp.status_code in (200, 500), f"Unexpected status: {resp.status_code}"
-
-    def test_post_reject_returns_ok(self, client_no_exceptions):
-        """POST /api/reject/{request_id} returns response without crashing.
-
-        Note: Same operation_manager issue as approve — see that test for details.
-        """
-        resp = client_no_exceptions.post('/api/reject/test_request_123')
-        assert resp.status_code in (200, 500), f"Unexpected status: {resp.status_code}"
-
-
 class _StubOperationManager:
     """Minimal OperationManager double for hermetic approval/AFK tests.
 
@@ -1208,6 +1185,10 @@ class _StubOperationManager:
         self.base_dir = Path(__file__).parent
         self.extra_work_folders_ro: list = []
         self.extra_work_folders_rw: list = []
+        # BUG_0420 SEC-02: record approve/reject so the REST happy-path tests can
+        # assert the endpoint routed through to the operation manager with the right args.
+        self.approve_calls: list = []
+        self.reject_calls: list = []
 
     def set_enable_timeout(self, enabled):
         from agent_cascade.runtime_state import state as _rs
@@ -1223,6 +1204,15 @@ class _StubOperationManager:
 
     def list_pending_approvals(self):
         return [dict(a) for a in self._pending]
+
+    # BUG_0420 SEC-02: approve/reject REST happy-path surface (recording no-ops).
+    def user_approve(self, request_id):
+        self.approve_calls.append(request_id)
+        return 'approved'
+
+    def user_reject(self, request_id, reason='Rejected by user'):
+        self.reject_calls.append((request_id, reason))
+        return 'rejected'
 
 
 class _FakeInstance:
@@ -1501,6 +1491,55 @@ class TestAuthenticatedCommandEndpoints:
         assert resp.json()['status'] == 'ok'
         assert fake.stop_session_calls == 1
         assert fake.instances['a'].state == AgentState.IDLE
+
+    # ── /api/approve + /api/reject (BUG_0420 SEC-02 — now session_token-gated) ──
+    # Formerly open endpoints; now gated by session_token exactly like /api/stop.
+    # Each test proves the 401 gate (bad / missing token) AND that a valid token
+    # routes through to operation_manager.user_{approve,reject}.
+
+    def test_approve_401_without_token(self, client):
+        """POST /api/approve/{request_id} with a bad token returns 401."""
+        assert client.post('/api/approve/req-1', params={'token': 'bad'}).status_code == 401
+
+    def test_approve_401_missing_token(self, client):
+        """POST /api/approve/{request_id} with no token returns 401."""
+        assert client.post('/api/approve/req-1').status_code == 401
+
+    def test_approve_valid_token_calls_user_approve(self, client):
+        """POST /api/approve/{request_id} (valid token) calls operation_manager.user_approve."""
+        token = self._token(client)
+        fake = _FakePool()  # .operation_manager is a _StubOperationManager (records calls)
+        saved = self._patch_pool(client, fake)
+        try:
+            resp = client.post(f'/api/approve/req-1', params={'token': token})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'ok'
+        assert fake.operation_manager.approve_calls == ['req-1']
+
+    def test_reject_401_without_token(self, client):
+        """POST /api/reject/{request_id} with a bad token returns 401."""
+        assert client.post('/api/reject/req-1', params={'token': 'bad'}).status_code == 401
+
+    def test_reject_401_missing_token(self, client):
+        """POST /api/reject/{request_id} with no token returns 401."""
+        assert client.post('/api/reject/req-1').status_code == 401
+
+    def test_reject_valid_token_calls_user_reject(self, client):
+        """POST /api/reject/{request_id} (valid token) calls user_reject with (id, reason)."""
+        token = self._token(client)
+        fake = _FakePool()
+        saved = self._patch_pool(client, fake)
+        try:
+            resp = client.post('/api/reject/req-1', params={'token': token, 'reason': 'nope'})
+        finally:
+            self._restore_pool(client, saved)
+
+        assert resp.status_code == 200
+        assert resp.json()['status'] == 'ok'
+        assert fake.operation_manager.reject_calls == [('req-1', 'nope')]
 
     # ── /api/restart (auth gate only — never actually re-execs in tests) ─────
 

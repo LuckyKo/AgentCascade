@@ -22,7 +22,7 @@ The shared secret derived from the handshake is used to encrypt payloads sent to
 - **Generation**: Created during the `/api/handshake` process.
 - **Persistence**: Stored in-memory on the server.
 - **Lifecycle**: Tokens are valid until the server restarts.
-- **Scope**: Only `/api/message` and `/api/status` require a valid session token.
+- **Scope**: Endpoints marked `Y` in the Endpoint Reference require a valid session token (e.g. `/api/message`, `/api/status`, `/api/approve`, `/api/reject`, and the command endpoints).
 
 ---
 
@@ -64,11 +64,11 @@ All API errors follow a consistent JSON format:
 | POST | `/api/resume_all` | N | Resumes all halted agents. |
 | GET | `/api/sessions` | N | Lists available saved sessions. |
 
-### Group C: Operation Governance (Auth-Free)
+### Group C: Operation Governance (Session Token)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/approve/{request_id}` | N | Approves a pending operation request. |
-| POST | `/api/reject/{request_id}` | N | Rejects a pending operation request. |
+| POST | `/api/approve/{request_id}?token=...` | Y | Approves a pending operation request. Token must be provided as a query parameter. |
+| POST | `/api/reject/{request_id}?token=...` | Y | Rejects a pending operation request. Token and `reason` are query parameters. |
 
 ### Group D: File & Data Management (Auth-Free)
 | Method | Path | Auth | Description |
