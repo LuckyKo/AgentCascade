@@ -500,3 +500,80 @@ def test_bandit_knob_defaults_off_and_env_backed():
     assert settings.SKILL_BANDIT_TARGET_FIRE == pytest.approx(0.10)
     assert 0.0 < settings.SKILL_BANDIT_THETA_MAX < 1.0, (
         'θ_max must be < 1 so mass-suppression is structurally impossible')
+
+
+# ── (h) BUG_0417: controller OFF (default) ⇒ bandit is rank-only / admit-all ─────
+#
+# The θ_min fire-rate controller (_update_skill_fire_rate) is gated by SKILL_BANDIT_CONTROLLER,
+# which defaults OFF. With it OFF, _skill_bandit_bar stays at its 0.0 seed ⇒ the value re-rank's
+# theta_min is 0.0 ⇒ admit-all ⇒ demote-only (the bandit reorders hints but never drops one).
+
+def test_bandit_controller_off_default_is_admit_all_rank_only(tmp_path, monkeypatch):
+    """BUG_0417: bandit ON but θ_min controller OFF (default) ⇒ the re-rank is admit-all
+    (output length == input length; demote-only). Two-sided so the admit-all assertion is
+    not vacuous:
+      • Control — a LIVE bar (θ_min=0.20) DOES drop the low-θ skill, proving the ledger can
+        drop candidates when a bar is active.
+      • OFF — driving the REAL deploy path (_process_job) over fired turns never calls
+        _update_skill_fire_rate, θ_min stays 0.0, and the re-rank admits every candidate.
+    Removing `and SKILL_BANDIT_CONTROLLER` at manager.py makes the OFF spy record calls and
+    fails this test — so it is a true guard, not decoration."""
+    monkeypatch.setattr(manager_mod, 'SKILL_BANDIT_WEIGHT', 1.0)         # bandit ON
+    monkeypatch.setattr(manager_mod, 'SKILL_BANDIT_CONTROLLER', 0)       # controller OFF (default)
+    monkeypatch.setattr(manager_mod, 'SKILL_BANDIT_THETA_MAX', 0.60)
+    HIGH = 'skill-high-value'                       # θ ≈ 0.96 → survives any live bar
+    ZERO = 'skill-never-loaded-low-theta'           # θ ≈ 0.03 → dropped by a live bar > 0.03
+    BASE = 'base-rate-keeper'                        # not a candidate; only fixes p̄ > 0
+    metrics = {HIGH: {'agent_selected_loads': 40, 'hints': 40},
+               ZERO: {'agent_selected_loads': 0, 'hints': 40},
+               BASE: {'agent_selected_loads': 40, 'hints': 100}}         # p̄ = 80/180 ≈ 0.44
+
+    # Control: a live θ_min genuinely drops the low-θ skill (proves admit-all below is real).
+    mgr_ctl, inst_ctl = _make_mgr(
+        tmp_path / 'ctl', _StubSkillManager(matches=[(HIGH, 0.50), (ZERO, 0.50)], metrics=metrics))
+    _neutralize_gates(mgr_ctl, monkeypatch)
+    _determinize_sampler(mgr_ctl)
+    mgr_ctl._skill_bandit_bar = 0.20                # simulate a live controller that drifted here
+    out_ctl = mgr_ctl._match_skills_for_hint(_job(turn=3), _settings(), inst_ctl)
+    assert ZERO not in out_ctl and HIGH in out_ctl, (
+        'control: a live θ_min=0.20 must drop the low-θ skill — so the admit-all below is '
+        'non-vacuous (the ledger CAN drop candidates when a bar is active)')
+
+    # OFF default: driving the real deploy path must leave the bar inert ⇒ admit-all.
+    mgr, inst = _make_mgr(
+        tmp_path / 'off', _StubSkillManager(matches=[(HIGH, 0.50), (ZERO, 0.50)], metrics=metrics))
+    _neutralize_gates(mgr, monkeypatch)
+    _determinize_sampler(mgr)
+    out = mgr._match_skills_for_hint(_job(turn=3), _settings(), inst)   # bar still at its 0.0 seed
+    assert len(out) == 2 and set(out) == {HIGH, ZERO}, (
+        'controller OFF ⇒ admit-all: every candidate survives; the bandit only demotes, never '
+        'drops (output length == input length)')
+    # The real deploy path must not move θ_min when the controller is OFF.
+    calls = []
+    monkeypatch.setattr(mgr, '_update_skill_fire_rate', lambda fired: calls.append(fired))
+    for i in range(3):
+        mgr._process_job(_job(turn=10 + i))          # fired skill-hint turns
+    assert calls == [], ('controller OFF must never drive _update_skill_fire_rate — the θ_min bar '
+                         'must stay inert (rank-only / admit-all)')
+    assert mgr._skill_bandit_bar == 0.0, 'controller OFF must leave θ_min at its 0.0 seed'
+
+
+def test_bandit_controller_knob_defaults_off_and_env_backed(monkeypatch):
+    """BUG_0417: SKILL_BANDIT_CONTROLLER must default OFF (⇒ bandit rank-only / admit-all) and
+    be env-backed, exactly like the other SKILL_BANDIT_* knobs."""
+    from agent_cascade import settings
+    assert settings.SKILL_BANDIT_CONTROLLER == 0, (
+        'SKILL_BANDIT_CONTROLLER must default OFF so the bandit is rank-only (admit-all) and '
+        'deploy-time behaviour stays byte-identical')
+    # env-backed: load a throwaway copy of settings.py with the env set in an ISOLATED namespace
+    # (importlib.reload would mutate the module every worker shares — house pattern, see
+    # tests/test_sanity_probe.py). Confirms the knob is read from the environment, not hardcoded.
+    import importlib.util
+    import os as _os
+    monkeypatch.setenv('AGENT_CASCADE_SKILL_BANDIT_CONTROLLER', '1')
+    _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    _sp = _os.path.join(_root, 'agent_cascade', 'settings.py')
+    spec = importlib.util.spec_from_file_location('_settings_0417_copy', _sp)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.SKILL_BANDIT_CONTROLLER == 1, 'SKILL_BANDIT_CONTROLLER must honour the env var'

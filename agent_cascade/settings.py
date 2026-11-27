@@ -1253,14 +1253,19 @@ SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FL
 # SKILL_BANDIT_WEIGHT: master toggle + modulation blend in [0,1]. 0.0 = OFF (default);
 #   1.0 = full Thompson-Sampling value re-rank; 0<W<1 ramps from raw order to full.
 #   The path is taken iff weight > 0.0 (a true predicate, not merely "is the setting set").
-#   NOTE: any weight > 0.0 turns on BOTH the value re-rank AND the bounded θ_min admission
-#   bar (which arms the fire-rate controller) — a small weight is NOT a "rank-only" mode;
-#   the bar still seeds at 0.0 (admit-all) and only drifts once the controller sees turns.
+#   NOTE (BUG_0417): with SKILL_BANDIT_CONTROLLER off (the default), any weight > 0.0 is
+#   RANK-ONLY — the re-rank reorders hints using the warm base-rate prior p̄ (learned from the
+#   durable global ledger; see SKILL_BANDIT_PRIOR_MASS) but the θ_min admission bar stays at its
+#   0.0 seed ⇒ admit-all / demote-only: no candidate is ever dropped. The bounded θ_min bar is
+#   gated SEPARATELY by SKILL_BANDIT_CONTROLLER (opt-in ON); only then does weight > 0.0 ALSO
+#   arm the self-adapting fire-rate controller that drifts the bar.
 #
 #   BUG_0417 — optimal value: there is NO universal optimum to hardcode. The weight is
 #   workload/data-dependent: the re-rank only adds value once the per-skill ledger has
-#   signal (p̄ ≠ 0); on a cold ledger p̄=0 ⇒ _value_rank returns raw order, so any W>0
-#   arms the fire-rate controller for zero value signal (pure churn). The bandit test
+#   signal (p̄ ≠ 0); on a cold ledger p̄=0 ⇒ _value_rank returns raw order, so any W>0 WITH the
+#   controller ON (opt-in, SKILL_BANDIT_CONTROLLER=1) arms the fire-rate controller for zero value
+#   signal (pure churn; with the controller OFF — the default — W>0 is rank-only, no churn). The
+#   bandit test
 #   harness is mechanics-only (determinized sampler; no recall/precision sweep over W),
 #   so no empirical optimum is derivable. RESOLUTION (Option A): keep the default OFF
 #   (0.0) to preserve deploy-time byte-identity — a non-zero default would REPLACE the
@@ -1270,6 +1275,13 @@ SKILL_PRECISION_FLOOR: float = float(os.getenv('AGENT_CASCADE_SKILL_PRECISION_FL
 #   conversion gain, and roll back by clearing the env var. Evidence:
 #   reports/BUG_0417_skill_bandit_weight_findings.md.
 SKILL_BANDIT_WEIGHT: float = float(os.getenv('AGENT_CASCADE_SKILL_BANDIT_WEIGHT', '0.0'))
+# SKILL_BANDIT_CONTROLLER: gates the self-adapting θ_min fire-rate controller
+# (_update_skill_fire_rate in memory_hint/manager.py). 0 = OFF (default, BUG_0417) ⇒ θ_min
+# stays at its 0.0 seed ⇒ the bandit is RANK-ONLY (admit-all / demote-only): it reorders hints
+# but never drops a candidate. 1 = ON ⇒ the full self-adapting controller drifts θ_min to hold
+# SKILL_BANDIT_TARGET_FIRE (the pre-tweak behaviour; opt-in — no evidence it improves recall).
+# Set to 1/true to enable; everything else (including unset) is OFF.
+SKILL_BANDIT_CONTROLLER: bool = os.getenv('AGENT_CASCADE_SKILL_BANDIT_CONTROLLER', '0').strip().lower() in ('1', 'true')
 # SKILL_BANDIT_PRIOR_MASS: prior mass m₀ of the base-rate-centred informed prior
 #   Beta(m₀·p̄ + s, m₀·(1−p̄) + f). Small m₀ = aggressive dormancy exploration; large =
 #   conservative. p̄ is the running global action-rate learned from the ledger, so a

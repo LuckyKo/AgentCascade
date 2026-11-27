@@ -34,7 +34,8 @@ from agent_cascade.settings import (SKILL_MATCH_THRESHOLD, MAX_AUTO_SKILLS_PER_C
                                     SKILL_HINT_ENTRY_COOLDOWN_SECONDS,
                                     SKILL_PRECISION_WEIGHT, SKILL_PRECISION_K,
                                     SKILL_PRECISION_FLOOR,
-                                    SKILL_BANDIT_WEIGHT, SKILL_BANDIT_PRIOR_MASS,
+                                    SKILL_BANDIT_WEIGHT, SKILL_BANDIT_CONTROLLER,
+                                    SKILL_BANDIT_PRIOR_MASS,
                                     SKILL_BANDIT_TARGET_FIRE, SKILL_BANDIT_GAIN,
                                      SKILL_BANDIT_THETA_MAX,
                                      MEMORY_BANDIT_WEIGHT, MEMORY_BANDIT_PRIOR_MASS,
@@ -1045,9 +1046,11 @@ class MemoryHintManager:
         # Self-adapting bandit: feed THIS processed skill-hint turn's fired-indicator to the
         # in-memory fire-rate controller, so the admission bar θ_min drifts to hold TARGET_FIRE.
         # Sees the final skill result regardless of which upstream gate caused a skip. Runs ONLY
-        # when the bandit is on (default OFF ⇒ zero extra work, byte-identical to today). Best-
-        # effort inside _update_skill_fire_rate — it never raises into the hint path.
-        if SKILL_BANDIT_WEIGHT > 0.0:
+        # when the bandit is on AND the θ_min controller is on (BUG_0417: SKILL_BANDIT_CONTROLLER
+        # defaults OFF ⇒ θ_min stays at its 0.0 seed ⇒ the bandit is rank-only / admit-all). Bandit
+        # OFF ⇒ zero extra work, byte-identical to today. Best-effort inside _update_skill_fire_rate
+        # — it never raises into the hint path.
+        if SKILL_BANDIT_WEIGHT > 0.0 and SKILL_BANDIT_CONTROLLER:
             self._update_skill_fire_rate(bool(skill_names))
         if MEMORY_BANDIT_WEIGHT > 0.0:                    # default-OFF ⇒ zero extra work, inert
             self._update_memory_fire_rate(bool(memory_bare))
