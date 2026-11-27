@@ -844,6 +844,30 @@ def build_stacks_router(agent_pool) -> 'APIRouter':
     return router
 
 
+def _cors_kwargs() -> dict:
+    """SEC-11: CORS config for the management API.
+
+    The WebUI is same-origin (served by this server), so a cross-origin credentialed
+    request is never required. Credentials are always dropped (kills the browser-driven
+    CSRF vector against the unauthenticated management endpoints) and origins are
+    restricted to local ones (localhost / 127.0.0.1 on any port) by default. An explicit
+    list may be supplied via AGENT_CASCADE_CORS_ORIGINS (comma-separated) for a separate
+    dev server; when set, the local-origins regex is ignored.
+    """
+    _cors_env = os.getenv('AGENT_CASCADE_CORS_ORIGINS', '').strip()
+    if _cors_env:
+        return {
+            'allow_origins': [o.strip() for o in _cors_env.split(',') if o.strip()],
+            'allow_origin_regex': None,
+            'allow_credentials': False,
+        }
+    return {
+        'allow_origins': [],
+        'allow_origin_regex': r'https?://(localhost|127\.0\.0\.1)(:\d+)?',
+        'allow_credentials': False,
+    }
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     """
     Create the FastAPI application.
@@ -976,10 +1000,9 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=['*'],
-        allow_credentials=True,
         allow_methods=['*'],
         allow_headers=['*'],
+        **_cors_kwargs(),
     )
 
     # ── Unified architecture imports (Phase 5) ───────────────────────────

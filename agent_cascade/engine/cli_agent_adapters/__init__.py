@@ -100,21 +100,38 @@ class InteractiveLoginAdapter:
         return [self.binary]
 
 
+# AC-owned secret env vars that must never reach an external child (SEC-12, defense in
+# depth for the docker-CLI *client* process env — a leaked client env / log must not
+# expose an AC credential). Prefixes + exact names:
+#   OPENAI_*              LLM key/endpoint (llm/oai.py, llm/azure.py)
+#   SERPER_*              web-search key (tools/web_search.py)
+#   AGENT_CASCADE_API_KEY AC management API key (api_server.py)
+#   DASHSCOPE_API_KEY     Qwen/DashScope LLM key (llm/qwen_dashscope.py)
+# Harness-native keys (ANTHROPIC_API_KEY, OPENCODE_API_KEY, the agy account cache) are
+# deliberately NOT here: those CLIs authenticate with their own account store, not AC's
+# key, and the container receives its single auth var via -e, so stripping them would
+# break harness auth for no security gain.
+_AC_SECRET_PREFIXES = ('OPENAI_', 'SERPER_')
+_AC_SECRET_EXACT = frozenset({'AGENT_CASCADE_API_KEY', 'DASHSCOPE_API_KEY'})
+
+
 def strip_ac_credentials(base_env: dict[str, str]) -> dict[str, str]:
-    """Strip AC-owned LLM credentials from a child env. Shared by all adapters (DRY).
+    """Strip AC-owned credentials from a child env. Shared by all adapters (DRY).
 
     Defined BEFORE ``_build_registry`` because the adapter modules import it at their
     module top, and the eager registry build below imports those adapters.
 
-    AgentCascade's OpenAI-compatible clients read the key/endpoint from the ``OPENAI_*``
-    env namespace (``llm/oai.py:408`` / ``llm/azure.py:36``), so every ``OPENAI_*`` var is
-    an AC secret and must never reach an external child. Harness-native auth (a Claude
-    subscription token, an opencode provider key, an ``agy`` account cache) is preserved
-    — those CLIs authenticate with their own account store, not AC's key, so over-stripping
-    every ``*_API_KEY`` would break harness auth for no security gain. Conservative: only
-    the AC namespace is removed; everything else passes through unchanged.
+    Removes every AC-owned secret (``_AC_SECRET_PREFIXES`` / ``_AC_SECRET_EXACT``) so the
+    docker-CLI *client* process env never carries an AC credential. Harness-native auth
+    (a Claude subscription token, an opencode provider key, an ``agy`` account cache) is
+    preserved — those CLIs authenticate with their own account store, not AC's key, and the
+    container receives its single auth var via ``-e``, so over-stripping every
+    ``*_API_KEY`` would break harness auth for no security gain.
     """
-    return {k: v for k, v in base_env.items() if not k.upper().startswith('OPENAI_')}
+    def _is_ac_secret(name: str) -> bool:
+        u = name.upper()
+        return u in _AC_SECRET_EXACT or any(u.startswith(p) for p in _AC_SECRET_PREFIXES)
+    return {k: v for k, v in base_env.items() if not _is_ac_secret(k)}
 
 
 def resolve_posture_flags(posture_flags: dict[str, list[str]], posture: str) -> list[str]:

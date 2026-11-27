@@ -2439,6 +2439,15 @@ class FileOpsMixin:
                 # state at commit time, just before the verbatim write.
                 backup_path_str = ''
                 is_new_now = not resolved.exists()
+                # SEC-10: close the TOCTOU window. A target that was absent at the
+                # pre-approval check (baseline None, auto-approved as a new file) but now
+                # exists at commit time was created by a concurrent writer during the
+                # unbounded approval wait. With no baseline there is nothing to confirm it is
+                # safe to back up and overwrite, so abort instead of clobbering it.
+                if not is_new_now and baseline_mtime_ns is None:
+                    return (f"ERROR: {path} was created on disk after the approval check "
+                            f"(concurrent modification). The write was NOT applied — "
+                            f"re-read the file and retry with the current content.")
                 if not is_new_now:
                     safe_agent = re.sub(r'[^a-zA-Z0-9_-]', '_', agent_name)
                     backup_dir = self.base_dir / 'logs' / 'backups' / safe_agent

@@ -106,6 +106,33 @@ def test_write_file_new_file_is_unguarded(monkeypatch):
         assert f.read_text(encoding='utf-8') == 'hello\n'
 
 
+def test_write_file_new_file_created_during_approval_is_refused(monkeypatch):
+    """SEC-10: a path absent at the pre-approval check that a concurrent writer creates
+    during the approval window must be refused (no clobber, no backup).
+
+    The new-file branch has no mtime+size baseline, so without the commit-time re-stat a
+    file created externally during the unbounded approval wait would be backed up and
+    overwritten. The guard now re-derives existence inside the lock and aborts.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        om = _make_om(d)
+        f = Path(d, 'touce_new.txt')  # absent pre-approval
+
+        # Force the approval path (so the racy callback below runs) for a new file.
+        monkeypatch.setattr(om, '_is_auto_approved', lambda *a, **k: False)
+
+        def racy_approval(**_kwargs):
+            f.write_text('external created it\n', encoding='utf-8')  # concurrent creation
+            return True, 'approved'
+
+        monkeypatch.setattr(om, 'request_user_approval', racy_approval)
+        res = om.write_file(str(f), 'replacement\n', 'coder')
+        assert res.startswith('ERROR') and 'concurrent' in res.lower(), res
+        assert f.read_text(encoding='utf-8') == 'external created it\n', \
+            f"concurrent writer's file was clobbered: {f.read_text(encoding='utf-8')!r}"
+        assert not list(Path(d).rglob('*.bak')), 'no backup should be created on abort'
+
+
 # ── verbatim line-ending round-trip (deliberate correctness fix) ──────────────
 
 
