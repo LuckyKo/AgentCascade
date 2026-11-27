@@ -959,6 +959,21 @@ class RunLoopMixin:
         if getattr(instance, '_auto_skill_orig_max_turns', None) is not None:
             instance.max_turns = instance._auto_skill_orig_max_turns
 
+        # BUG_0416 Lever 2 (B1, default OFF): flush any tool warnings (memory hints) that
+        # were queued this run but never drained into a tool result — the dominant delivery
+        # loss (a text-only final turn has no drain opportunity). Surfaced as a SYSTEM-role
+        # note on the persistent conversation so the NEXT run's model call sees it (R1).
+        # Gated OFF by default → method never called → byte-identical to today. Placed here
+        # (run()'s finally) so it runs on every exit path and never races an in-flight turn.
+        if _ac_settings.MEMORY_HINT_SURFACE_ON_TEXT_TURN:
+            handler = getattr(self, 'compression_handler', None)
+            if handler is not None:
+                try:
+                    handler._drain_tool_warnings_into_system_note(instance)
+                except Exception as e:  # noqa: BLE001 — best-effort flush, never break finalize
+                    logger.debug('[MEMORY_HINT] finalize system-note flush failed for %s: %s',
+                                 getattr(instance, 'instance_name', '?'), e)
+
         inst_name = instance.instance_name
         suspended_this_run = getattr(instance, '_compression_suspended_at', 0.0) > 0.0
         terminated = self._is_terminal_stop(inst_name)

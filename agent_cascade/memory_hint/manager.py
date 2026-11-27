@@ -285,6 +285,20 @@ class MemoryHintManager:
         self._inline_delivered = 0
         self._deferred_delivered = 0
 
+        # BUG_0416 delivery-surfacing counters (same plain-int, in-memory convention):
+        # _hint_queued     = _deliver attempts whose queue-land actually succeeded
+        #                    (_queue_tool_warning returned True) — distinct from the
+        #                    _deferred_delivered ATTEMPT counter above, which is NOT proof
+        #                    the hint reached the model.
+        # _hint_stale_dropped = jobs dropped by the most-recent-wins generation filter in
+        #                    _run (intended behavior; counted for observability only).
+        # _hint_drained_into_result = drain windows that surfaced a [MEMORY HINT] into model
+        #                    context; incremented by compression/handler on the manager
+        #                    (the only counter that proves a hint actually reached the model).
+        self._hint_queued = 0
+        self._hint_stale_dropped = 0
+        self._hint_drained_into_result = 0
+
         # Safety-net rescan trigger (plan §6.2): worker compares this each idle tick.
         self._last_config_version = -1
 
@@ -962,6 +976,10 @@ class MemoryHintManager:
             # clearing the current (newer) pending entry.
             with self._pending_lock:
                 if name is not None and job.get('_gen') != self._generation.get(name):
+                    # BUG_0416: most-recent-wins drop is INTENDED (don't deliver a stale
+                    # hint), so we do NOT change the behavior — only count it so this loss
+                    # path becomes observable (it never reaches _deliver or any other counter).
+                    self._hint_stale_dropped += 1
                     continue
             try:
                 self._process_job(job)
@@ -1750,9 +1768,15 @@ class MemoryHintManager:
         when it claims a ready hint.
         """
         try:
+            # BUG_0416: _deferred_delivered is an ATTEMPT counter kept for back-compat —
+            # it does NOT prove the hint reached the model (inst gone / dedup / no drain).
+            # _hint_queued is the honest "actually landed in _tool_warnings" counter; the
+            # compression drain's _hint_drained_into_result is the "surfaced to model" one.
             self._deferred_delivered += 1
             from agent_cascade.operation_manager.path_security import _queue_tool_warning
-            _queue_tool_warning(self._pool, name, hint_text)
+            landed = _queue_tool_warning(self._pool, name, hint_text)
+            if landed:
+                self._hint_queued += 1
             logger.info('[MEMORY_HINT] %s: queued hint (mode=%s) (%d entries):\n%s',
                         name, mode, hint_text.count('\n  - '), hint_text)
         except Exception as e:  # noqa: BLE001 — best-effort delivery

@@ -48,7 +48,7 @@ def _normalize_separators(path: str) -> str:
 # ─── Thread-local instance name helpers ───────────────────────────────────
 
 
-def _queue_tool_warning(pool, instance_name: Optional[str], warning_text: str) -> None:
+def _queue_tool_warning(pool, instance_name: Optional[str], warning_text: str) -> bool:
     """Queue a tool warning for the given agent instance.
 
     Appends *warning_text* to the instance's _tool_warnings list so it can be
@@ -56,13 +56,20 @@ def _queue_tool_warning(pool, instance_name: Optional[str], warning_text: str) -
     the instance's _compression_lock (reentrant RLock). Dedup guard prevents
     identical warnings from being queued multiple times in one drain cycle.
 
+    BUG_0416: now returns whether the warning actually landed, so callers can
+    distinguish a real queue-land from a silent no-op (inst gone / dedup hit)
+    for telemetry.
+
     Args:
         pool: AgentPool for looking up instances (or None — best-effort).
         instance_name: Agent instance name (None → no-op).
         warning_text: Warning string to queue.
+    Returns:
+        True if the warning was appended, False on any no-op path (bad args,
+        instance gone, dedup hit, or exception).
     """
     if not instance_name or not pool:
-        return
+        return False
 
     try:
         inst = pool.get_instance(instance_name)
@@ -70,13 +77,14 @@ def _queue_tool_warning(pool, instance_name: Optional[str], warning_text: str) -
             with inst._compression_lock:
                 # Dedup guard — skip if exact same warning already queued (field is typed List[str])
                 if warning_text in inst._tool_warnings:
-                    return
+                    return False
                 inst._tool_warnings.append(warning_text)
+                return True
     except Exception:
         # Non-critical — warnings are best-effort hints for the agent
         from agent_cascade.log import logger
         logger.debug(f"Failed to queue tool warning for '{instance_name}'")
-        pass
+    return False
 
 
 def _get_current_instance_name() -> Optional[str]:

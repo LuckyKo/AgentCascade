@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from agent_cascade.execution_engine import ExecutionEngine
 
 from agent_cascade.agent_instance import AgentInstance
-from agent_cascade.llm.schema import USER, ContentItem, Message
+from agent_cascade.llm.schema import SYSTEM, USER, ContentItem, Message
 from agent_cascade.log import logger
 from agent_cascade.runtime_state import state as _runtime_state
 from agent_cascade import settings
@@ -337,6 +337,24 @@ class CompressionHandler:
                 instance._pending_notifications = []
         return text
 
+    def _count_hint_drain(self, items) -> None:
+        """BUG_0416 telemetry: count a drain window that surfaced at least one memory hint.
+
+        Purely observational — never changes what is drained. Reaches the manager via
+        ``pool.memory_hint_manager`` and only increments a REAL ``int`` counter, so a
+        MagicMock pool or stub manager can never break a drain nor spuriously bump it.
+        The only counter that proves a hint actually reached model context.
+        """
+        if not items or not any('[MEMORY HINT]' in str(i) for i in items):
+            return
+        mgr = getattr(getattr(self, 'pool', None), 'memory_hint_manager', None)
+        if mgr is None or not isinstance(getattr(mgr, '_hint_drained_into_result', None), int):
+            return
+        try:
+            mgr._hint_drained_into_result += 1
+        except Exception:  # noqa: BLE001 — telemetry never breaks a drain
+            pass
+
     def _drain_tool_warnings(
         self,
         instance: 'AgentInstance',
@@ -350,6 +368,7 @@ class CompressionHandler:
             instance._tool_warnings = []
 
         if items:
+            self._count_hint_drain(items)
             if not isinstance(text, str):
                 text = str(text)
             block = '\n\n'.join(str(i) for i in items)
@@ -443,6 +462,7 @@ class CompressionHandler:
             instance._tool_warnings = []
 
         if warnings:
+            self._count_hint_drain(warnings)
             block = '\n\n'.join(str(w) for w in warnings)
             text = f"[SYSTEM NOTIFICATIONS]\n{block}"
             text_item = ContentItem(text=text)
@@ -451,6 +471,53 @@ class CompressionHandler:
             else:
                 items.append(text_item)
         return items
+
+    def _drain_tool_warnings_into_system_note(self, instance: 'AgentInstance') -> bool:
+        """BUG_0416 Lever 2 (B1): surface undrained tool warnings as a SYSTEM-role note.
+
+        The dominant delivery loss is that ``_tool_warnings`` is drained ONLY while a tool
+        result is being assembled (or an external USER message is injected). A hint queued
+        after the run's last turn — a text-only final answer — is therefore never drained and
+        silently discarded. This method is the end-of-run / text-turn flush: it drains the
+        queue and appends a single ``[SYSTEM NOTIFICATIONS]`` block as a **SYSTEM**-role note
+        to the persistent working set so the NEXT model call (next run) sees it.
+
+        R1: never user-role. System notes do not break USER/ASSISTANT alternation, so this is
+        always API-safe. The note is appended to ``instance.conversation`` under
+        ``instance._compression_lock`` (the live conversation-mutation lock) and the turn's
+        ``_cached_messages``/``_cached_llm_messages`` build caches are cleared so the next run
+        rebuilds from the updated conversation (the current code has no ``_history_version`` /
+        token-cache layer; do not reintroduce one). For a run-ending final turn there is no
+        subsequent model call within THIS run, so the note is persisted for the next run / user
+        transcript and the surfacing counter is still bumped (accepted trade-off, documented).
+        Returns True if a note was appended.
+        """
+        with instance._compression_lock:
+            drained = list(instance._tool_warnings)
+            instance._tool_warnings = []
+
+        if not drained:
+            return False
+
+        # Same surfacing telemetry as the tool-result drains: a hint that reaches model-visible
+        # conversation counts, even if this flush is the only path that surfaced it.
+        self._count_hint_drain(drained)
+        note = '[SYSTEM NOTIFICATIONS]\n' + '\n\n'.join(str(w) for w in drained)
+
+        try:
+            with instance._compression_lock:
+                instance.conversation.append(Message(role=SYSTEM, content=note))
+                # Clear the per-turn message-build caches so the next run rebuilds from the
+                # updated conversation and sees this note (no token-cache/version layer here).
+                instance._cached_messages = []
+                instance._cached_llm_messages = []
+            logger.info('[MEMORY_HINT] %s: surfaced undrained warning(s) as SYSTEM note (%d entries)',
+                        instance.instance_name, len(drained))
+            return True
+        except Exception as e:  # noqa: BLE001 — best-effort flush, never break finalize
+            logger.debug('[MEMORY_HINT] system-note surfacing failed for %s: %s',
+                         getattr(instance, 'instance_name', '?'), e)
+            return False
 
     def _drain_pending_into_list(
         self,

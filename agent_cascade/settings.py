@@ -1365,6 +1365,26 @@ MEMORY_BANDIT_M_FLOOR: float = float(os.getenv('AGENT_CASCADE_MEMORY_BANDIT_M_FL
 # AGENT_CASCADE_MEMORY_HINT_INLINE=0 for deferred-only delivery.
 MEMORY_HINT_INLINE: bool = os.getenv('AGENT_CASCADE_MEMORY_HINT_INLINE', '1').lower() in ('1', 'true', 'yes')
 
+# BUG_0416 Lever 1 (opt-in, default OFF): bounded micro-wait budget for the inline peek.
+# When > 0, the post-Phase-4 peek waits at most this many ms (via h.ready.wait, OUTSIDE
+# h.lock) for the worker to compute the hint before deciding claim-vs-abandon. This is the
+# ONLY deliberate relaxation of the "never block the turn-critical path" invariant; it is
+# bounded and never joins the worker thread. 0 = skip the wait entirely → byte-identical to
+# the pre-BUG_0416 non-blocking peek. Recommend opt-in values of 50–100 ms.
+try:
+    MEMORY_HINT_INLINE_WAIT_MS: int = max(0, int(os.getenv('AGENT_CASCADE_MEMORY_HINT_INLINE_WAIT_MS', '0')))
+except (TypeError, ValueError):
+    MEMORY_HINT_INLINE_WAIT_MS: int = 0
+
+# BUG_0416 Lever 2 (the real fix, default OFF): surface undrained tool warnings (memory
+# hints) that were queued but never reached the model because the run's next/last turn had
+# no tool result to drain them. When True, run-loop finalize drains instance._tool_warnings
+# into a SYSTEM-role [SYSTEM NOTIFICATIONS] note on the persistent conversation (NEVER a
+# user message — R1) so the next model call sees it. False → the method is never called →
+# byte-identical to today. Set AGENT_CASCADE_MEMORY_HINT_SURFACE_ON_TEXT_TURN=1 to enable.
+MEMORY_HINT_SURFACE_ON_TEXT_TURN: bool = os.getenv(
+    'AGENT_CASCADE_MEMORY_HINT_SURFACE_ON_TEXT_TURN', '0').lower() in ('1', 'true', 'yes')
+
 # Hard-reject similarity gate for propose_skill: a NEW skill (or an UPDATE) whose
 # frontmatter text is MORE similar than this ratio to any existing registered skill
 # is rejected before approval/registration. Strict `>` comparison — a score of exactly

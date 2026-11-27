@@ -102,6 +102,18 @@ class MemoryHintMixin:
             h = getattr(instance, '_pending_hint_job', None)
             if h is None or h.instance_name != instance.instance_name:
                 return  # no pending handle, or stashed for a different instance (stale)
+            # BUG_0416 Lever 1 (opt-in, default 0 = no wait): bounded micro-wait so the
+            # worker has a chance to finish the match before we abandon it. The wait is
+            # taken OUTSIDE h.lock — the turn-critical path is only ever blocked by a
+            # bounded Event.wait, never a join() — and the claim/abandon decision below
+            # re-checks h.ready INSIDE h.lock, so interleaving-4 (exactly-one XOR delivery)
+            # is unchanged. h is owned by a daemon worker, so teardown strands nothing.
+            # wait_ms == 0 skips the wait entirely → byte-identical to the historical
+            # non-blocking peek. h.ready may already be set (worker won the race), in which
+            # case Event.wait returns immediately without consuming the budget.
+            wait_ms = getattr(settings, 'MEMORY_HINT_INLINE_WAIT_MS', 0)
+            if wait_ms > 0:
+                h.ready.wait(timeout=wait_ms / 1000.0)
             claim_text = None
             # Single-locked decision — re-check ready UNDER the lock so the worker's
             # "ready + defer-decision" region and this peek's claim region are mutually
