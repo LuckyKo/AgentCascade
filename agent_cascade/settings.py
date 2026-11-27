@@ -339,15 +339,18 @@ COMPRESSOR_REUSE_CLAIM_WAIT_SECONDS: float = float(
 # user- and agent-called sub-agents, while system advisors use this fixed set so a UI edit
 # cannot widen or narrow their capabilities.
 #
-# The default is the 18-tool set the Security guard was actually running with (mirrors the
-# live config/pool_settings.json "Security" entry, 2026-11-16): the seed
-# (DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd'}) with scan_skills dropped and
-# image_gen / tool_search / send_message / media_gen / call_cli_agent / view_image added.
+# The default is the fixed tool floor for the system-launched Security guard / Skill Advisor:
+# the seed (DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd'}) with scan_skills dropped, plus
+# image_gen / tool_search / send_message / media_gen / call_cli_agent / view_image (host/coord
+# tools the guard never needs) and web_search / web_extractor / view_media — a trusted
+# reviewer must not fetch untrusted web content or view media, so those untrusted-content
+# tools are kept off the guard's attack surface.
 # System agents keep read-only shell via restricted_shell=True, so shell_cmd stays out.
 # Comma-separated tool names; empty string disables nothing (0 = no restrictions).
 _ADVISOR_DISABLED_TOOLS_DEFAULT = ','.join(sorted(
     (DEFAULT_SECURITY_DISABLED_TOOLS - {'shell_cmd', 'scan_skills'})
-    | {'image_gen', 'tool_search', 'send_message', 'media_gen', 'call_cli_agent', 'view_image'}
+    | {'image_gen', 'tool_search', 'send_message', 'media_gen', 'call_cli_agent', 'view_image',
+       'web_search', 'web_extractor', 'view_media'}
 ))
 ADVISOR_AGENT_DISABLED_TOOLS: frozenset[str] = frozenset(
     t.strip() for t in os.getenv('AGENT_CASCADE_ADVISOR_DISABLED_TOOLS',

@@ -191,6 +191,21 @@ def test_exclusive_flag_is_a_declared_field():
     assert _make_instance(exclusive=True, fixed_set=True)._exclusive_disabled_tools is True
 
 
+def test_guard_floor_disables_untrusted_content_tools():
+    """SEC-07: a trusted Security reviewer must not fetch untrusted web content or view
+    media — web_search / web_extractor / view_media are in the fixed floor, and each is a
+    registered tool (so the resolver's use-time registry filter does not drop it vacuously)."""
+    for tool in ('web_search', 'web_extractor', 'view_media'):
+        assert tool in ADVISOR_AGENT_DISABLED_TOOLS, (
+            f'{tool!r} must be in the Security guard floor so the guard cannot fetch '
+            f'untrusted web content / view media'
+        )
+        assert tool in _known_tools(), (
+            f'{tool!r} is in the floor but not a registered tool, so the resolver would '
+            f'drop it and the guard would keep it enabled'
+        )
+
+
 # ── Gate 1: the offered-tool schema (engine/helpers) ─────────────────────────────────
 
 def test_exclusive_schema_path_skips_live_pool_union():
