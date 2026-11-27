@@ -42,6 +42,7 @@ from agent_cascade.llm.schema import (ASSISTANT, DEFAULT_SYSTEM_MESSAGE, FUNCTIO
 from agent_cascade.log import logger
 from agent_cascade.settings import (CHAT_TEMPLATE_TOKEN_OVERHEAD, IMAGE_MAX_SHORT_SIDE, IMAGE_TOKEN_ESTIMATE,
                                     IMAGE_TOKEN_MIN, IMAGE_TOKEN_PATCH_SIZE)
+from agent_cascade.utils.ssrf_guard import assert_public_url_egress, guarded_get
 
 # Max length for function/tool call arguments before truncation (shared across utils and agent_invoker)
 MAX_FC_ARGS_LEN = 2048
@@ -378,8 +379,12 @@ def save_url_to_local_work_dir(url: str, save_dir: str, save_filename: str = '')
         url = sanitize_chrome_file_path(url)
         shutil.copy(url, new_path)
     else:
+        # SEC-09: refuse egress to loopback / private / link-local / cloud-metadata before any
+        # network I/O (SSRF guard); guarded_get re-validates on every redirect hop, so a public
+        # host cannot 302 the fetch into a reserved range. Raises a clean ValueError on a block.
+        assert_public_url_egress(url)
         try:
-            response = requests.get(url, headers=_HTTP_FETCH_HEADERS, timeout=_HTTP_FETCH_TIMEOUT)
+            response = guarded_get(url, headers=_HTTP_FETCH_HEADERS, timeout=_HTTP_FETCH_TIMEOUT)
             response.raise_for_status()
             with open(new_path, 'wb') as file:
                 file.write(response.content)
@@ -413,6 +418,9 @@ def contains_html_tags(text: str) -> bool:
 
 
 def get_content_type_by_head_request(path: str) -> str:
+    # SEC-09: refuse egress to non-public addresses before the HEAD request (SSRF guard).
+    if is_http_url(path):
+        assert_public_url_egress(path)
     try:
         response = requests.head(path, headers=_HTTP_FETCH_HEADERS, timeout=5)
         content_type = response.headers.get('Content-Type', '')
