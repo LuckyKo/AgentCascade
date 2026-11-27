@@ -1004,6 +1004,19 @@ TELEMETRY_CHECKPOINT_EVENT_INTERVAL: int = int(os.getenv('AGENT_CASCADE_TELEMETR
 MODEL_PRICING: Dict[str, Dict[str, float]] = ast.literal_eval(
     os.getenv('AGENT_CASCADE_MODEL_PRICING', '{}'))
 
+# ── DNA cohort accumulation loop (BUG_0401 PHASE 2) ──
+# Master toggle for the periodic dna_cohort analysis loop. When enabled, a
+# long-interval server-lifetime task re-scans the telemetry dir and (on a
+# CUT_CANDIDATE with human-supplied content) stages a one-click approve artifact.
+# It NEVER commits, reloads, or edits dna.py beyond the staged patch. Default OFF
+# = the loop idles (the cut stays human-approved). Env-overridable: 0/false disables.
+DNA_COHORT_LOOP_ENABLED: bool = os.getenv('AGENT_CASCADE_DNA_COHORT_LOOP_ENABLED',
+                                          '0').strip().lower() in ('1', 'true', 'yes', 'on')
+# Tick interval between dna_cohort passes (seconds); re-read every tick so a live
+# settings change takes effect without a restart. Only used when the loop is enabled.
+DNA_COHORT_INTERVAL_SECS: int = int(os.getenv('AGENT_CASCADE_DNA_COHORT_INTERVAL_SECS',
+                                              3600))  # Seconds between dna_cohort passes
+
 # Settings for LM Studio
 LM_STUDIO_KEEPALIVE_SECONDS: float = float(os.getenv('AGENT_CASCADE_LM_STUDIO_KEEPALIVE',
                                                      3.0))  # Keepalive expiry in seconds

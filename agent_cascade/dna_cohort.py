@@ -1,4 +1,4 @@
-"""BUG_0401 — DNA-telemetry accumulation pipeline: deterministic core (PHASE 1).
+"""DNA-telemetry accumulation pipeline: deterministic core.
 
 A pure, side-effect-free analysis core that replaces the manual, LLM-in-the-loop
 DNA-telemetry accumulation pass:
@@ -9,8 +9,12 @@ DNA-telemetry accumulation pass:
 Design contract (see plan ``BUG_0401_dna_cohort_pipeline.md`` §1-§3):
 - NO LLM, NO agent import at analysis time. Pure stdlib only, so it is fully
   deterministic and unit-testable.
-- The only human-in-the-loop is the promotion cut itself; PHASE 1 never writes a
-  cut. ``prepare_cut`` is a documented PHASE-2 seam and raises on use.
+- The only human-in-the-loop is the promotion cut itself. ``prepare_cut`` stages a
+  human-approve-only cut artifact (HEAD-based diff + K=5 canary plan + gate evidence);
+  ``apply_approved_cut`` stages it to the git INDEX and commits only on an explicit
+  human ``commit=True`` (no auto-commit, no auto-reload, no auto-edit of dna.py). The
+  periodic loop is settings-gated and
+  default OFF (it only prepares; a HUMAN runs the apply).
 - All gate thresholds live in ONE dict (``GATE_THRESHOLDS``) and the frozen
   baseline is a single config constant (``DEFAULT_BASELINE_HASH``) — never
   auto-rotated. Every metric delta is computed against that baseline.
@@ -22,10 +26,13 @@ The cohort key is always ``prompt_hash`` (content truth), NEVER ``dna_version``
 from __future__ import annotations
 
 import datetime
+import difflib
 import glob
 import json
 import os
+import re
 import statistics
+import subprocess
 import threading
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -120,14 +127,42 @@ class LabelingGap:
     proposed_bump: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class CutArtifact:
-    """PHASE-2 placeholder (Q3). Not produced in PHASE 1 — see ``prepare_cut``."""
-    prompt_hash: str
-    cut_patch_path: str
+    """Staged, human-approve-only promotion-cut record. Mutable on purpose:
+    ``status`` transitions PENDING -> APPROVED when a human runs
+    ``apply_approved_cut``. The artifact records exactly what was staged (paths +
+    the two git commands) so the action is auditable and reproducible. Nothing
+    here is applied at creation time — ``prepare_cut`` writes files only."""
+    candidate_hash: str
+    repo_dir: str
+    patch_path: str
     canary_plan_path: str
     gate_evidence_path: str
-    status: str
+    status: str                       # 'PENDING' | 'APPROVED'
+    git_commands: tuple[str, str]     # ('git apply --check ...', 'git apply --cached ...')
+    created_at: str
+
+    @classmethod
+    def reconstruct(cls, candidate_hash: str, repo_dir: str, workspace_root: str,
+                    *, created_at: str | None = None) -> 'CutArtifact':
+        """Single source of truth for the cut-artifact on-disk layout and the
+        two-command git invocation format. Both ``prepare_cut`` (when writing) and
+        the human apply endpoint (when rehydrating a staged artifact) build it here
+        so the filenames and command strings never drift apart."""
+        prep_dir = os.path.join(workspace_root, 'dna_cut_prep', candidate_hash)
+        patch_path = os.path.join(prep_dir, 'cut.patch')
+        check_cmd = f'git -C "{repo_dir}" apply --check "{patch_path}"'
+        stage_cmd = f'git -C "{repo_dir}" apply --cached "{patch_path}"'
+        return cls(
+            candidate_hash=candidate_hash, repo_dir=repo_dir,
+            patch_path=patch_path,
+            canary_plan_path=os.path.join(prep_dir, 'canary_plan.md'),
+            gate_evidence_path=os.path.join(prep_dir, 'gate_evidence.json'),
+            status='PENDING',
+            git_commands=(check_cmd, stage_cmd),
+            created_at=created_at if created_at is not None else _now_utc_iso(),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +467,7 @@ def run_gate(candidate: CohortRow, baseline: CohortRow | None, thresholds: dict,
     return GateDecision(
         status=CUT_CANDIDATE, failing=(),
         reasoning=('all prereqs + hard gates + composites pass, diff ready and '
-                   'single-variable — stage the one-click approve artifact (PHASE 2).')
+                   'single-variable — stage the one-click approve artifact.')
                   + (f' | {advisory}' if advisory else ''),
         deltas=deltas,
     )
@@ -606,48 +641,193 @@ def _render_note_block(rows: dict[str, CohortRow], decisions: dict[str, GateDeci
 
 # ---------------------------------------------------------------------------
 # LAYER 2: side-effecting prepare/write (thin, guarded, gated).
-# PHASE 1: note updates only (and even those are skipped under dry_run). The
-# cut artifact (Q3) is PHASE 2 and intentionally not implemented here.
+# Note updates (skipped under dry_run) + human-approve-only cut staging
+# (prepare_cut/_stage_cuts) — it never commits. apply_approved_cut is the
+# separate HUMAN apply (index-stage; commits only on an explicit commit=True).
 # ---------------------------------------------------------------------------
-def prepare_cut(candidate_hash: str, repo_dir: str, decision: GateDecision) -> CutArtifact:
-    """PHASE 2 ONLY (Q3): compute a HEAD-based ``dna.py`` diff + canary plan +
-    gate evidence under ``workspace/dna_cut_prep/<hash>/`` and surface it for
-    human approval. NOT implemented in PHASE 1 — raises on any use so the
-    manual-pipeline guardrail is never silently bypassed.
+# repo-relative path of the serving DNA prompt, for the HEAD-based cut diff.
+DNA_RELPATH: str = 'agent_cascade/prompts/dna.py'
+
+# K=5 canary watch rules, pre-decided so the post-cut watch is never improvised.
+CANARY_WATCH_WINDOW: int = 5
+CANARY_ROLLBACK_TRIGGERS: tuple[str, ...] = (
+    'canary tool-acc falls 3 or more points below the frozen baseline',
+    'a new hard-failure class appears (a failure mode absent from the baseline cohort)',
+    'cost/task rises 25% or more and is unoffset (no qualifying efficiency release)',
+)
+
+
+def _render_canary_plan(candidate_hash: str, baseline_hash: str) -> str:
+    """K=5 canary watch plan, templated from the framework rules (zero LLM)."""
+    out = [f'# Canary watch plan — candidate `{candidate_hash}`',
+           f'Cut from frozen baseline `{baseline_hash}` (never auto-rotated).',
+           '',
+           '## Watch window',
+           f'- K = {CANARY_WATCH_WINDOW}: observe the first {CANARY_WATCH_WINDOW} sessions '
+           'post-cut before deciding to keep or roll back.',
+           '',
+           '## Rollback triggers (ANY ONE triggers an immediate rollback)']
+    for i, t in enumerate(CANARY_ROLLBACK_TRIGGERS, 1):
+        out.append(f'{i}. {t}.')
+    out += ['',
+           '> Rollback = manual retag to the prior serving `dna_version` / HEAD of '
+           '`dna.py`. The cut is human-approved; nothing here ships autonomously.']
+    return '\n'.join(out) + '\n'
+
+
+def _bump_dna_version(content: str, bump: str) -> str:
+    """Force the candidate's ``DNA_VERSION`` line to ``bump`` (preserving any
+    ``: str`` annotation and the existing quote style). No-op when no such line."""
+    pat = re.compile(r"(DNA_VERSION(?:\s*:\s*str)?\s*=\s*)(['\"])[^'\"]*\2")
+    return pat.sub(lambda m: f'{m.group(1)}{m.group(2)}{bump}{m.group(2)}',
+                   content, count=1)
+
+
+def _git_show_head(repo_dir: str, rel_path: str) -> str:
+    """Exact committed-HEAD blob of ``rel_path`` (immune to the dirty/WIP tree).
+    Read as raw bytes and utf-8-decoded WITHOUT newline translation so patch
+    context matches the repo's real line endings regardless of autocrlf."""
+    proc = subprocess.run(['git', '-C', repo_dir, 'show', f'HEAD:{rel_path}'],
+                          capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f'git show HEAD:{rel_path} failed in {repo_dir!r}: '
+            f'{proc.stderr.decode('utf-8', 'replace').strip()}')
+    return proc.stdout.decode('utf-8')
+
+
+def prepare_cut(candidate_hash: str, repo_dir: str, decision: GateDecision,
+                candidate_content: str, *, workspace_root: str,
+                version_bump: str | None = None,
+                baseline_hash: str = DEFAULT_BASELINE_HASH) -> CutArtifact:
+    """Stage a human-approve-only promotion cut. ONLY meaningful on
+    ``CUT_CANDIDATE`` — raises on any other status so the gate is never bypassed.
+
+    The diff is computed against **committed HEAD** (``git show HEAD:.../dna.py``),
+    immune to the dirty/WIP working tree. ``candidate_content`` is the human-supplied
+    proposed new ``dna.py`` text (the candidate change + intended version bump); when
+    ``version_bump`` is supplied (or surfaced by a labeling gap) it is forced onto the
+    candidate's ``DNA_VERSION`` line. Writes ``cut.patch`` (HEAD-based unified diff),
+    ``canary_plan.md`` (K=5 watch + rollback triggers) and ``gate_evidence.json`` under
+    ``<workspace>/dna_cut_prep/<candidate_hash>/``. **Applies NOTHING** — the human runs
+    ``apply_approved_cut``.
     """
-    raise NotImplementedError(
-        'prepare_cut is a PHASE-2 feature (HEAD-based cut staging + one-click '
-        'approve); PHASE 1 ships only the deterministic analysis core + report.')
+    if decision.status != CUT_CANDIDATE:
+        raise ValueError(
+            f'prepare_cut is only valid on {CUT_CANDIDATE}, got status '
+            f'{decision.status!r} for {candidate_hash!r}')
+    if candidate_content is None:
+        raise ValueError('prepare_cut requires candidate_content (the proposed new '
+                         'dna.py text); hashes alone cannot reconstruct the candidate.')
+
+    new_content = candidate_content
+    if version_bump:
+        new_content = _bump_dna_version(new_content, version_bump)
+    old_content = _git_show_head(repo_dir, DNA_RELPATH)
+
+    patch = ''.join(difflib.unified_diff(
+        old_content.splitlines(keepends=True),
+        new_content.splitlines(keepends=True),
+        fromfile=f'a/{DNA_RELPATH}', tofile=f'b/{DNA_RELPATH}', lineterm='\n'))
+    if patch and not patch.endswith('\n'):
+        patch += '\n'
+
+    created_at = _now_utc_iso()
+    art = CutArtifact.reconstruct(candidate_hash, repo_dir, workspace_root,
+                                  created_at=created_at)
+    os.makedirs(os.path.dirname(art.patch_path), exist_ok=True)
+    # newline='' so the patch is written byte-exact (no \n -> \r\n translation).
+    with open(art.patch_path, 'w', encoding='utf-8', newline='') as fh:
+        fh.write(patch)
+    with open(art.canary_plan_path, 'w', encoding='utf-8') as fh:
+        fh.write(_render_canary_plan(candidate_hash, baseline_hash))
+
+    evidence = {
+        'candidate_hash': candidate_hash,
+        'status': decision.status,
+        'failing': list(decision.failing),
+        'reasoning': decision.reasoning,
+        'deltas': {m: list(v) for m, v in decision.deltas.items()},
+        'created_at': created_at,
+    }
+    with open(art.gate_evidence_path, 'w', encoding='utf-8') as fh:
+        json.dump(evidence, fh, indent=2, sort_keys=True)
+    return art
 
 
 def apply_approved_cut(artifact: CutArtifact, *, commit: bool = False) -> str:
-    """PHASE 2 ONLY: HUMAN-triggered ``git apply --cached`` of an approved cut
-    (no commit unless ``commit=True``). Never invoked by the periodic loop."""
-    raise NotImplementedError(
-        'apply_approved_cut is a PHASE-2 feature; PHASE 1 ships only the '
-        'deterministic analysis core + report.')
+    """HUMAN-triggered ONLY (never called by the periodic loop): stage an approved
+    cut to the git index with NO commit unless ``commit=True``. When ``commit=True``
+    the resulting commit contains ONLY the staged cut (``git commit -m`` of the index),
+    never unrelated working-tree WIP.
+
+    Runs ``git apply --check`` first. On a clean tree it then runs ``git apply
+    --cached`` (index-stage). On a dirty/WIP tree ``--check`` typically fails — in
+    that case we do NOT force; we return the exact manual command for the human.
+    Marks ``artifact.status='APPROVED'`` either way (approval was granted) and
+    returns the git output / manual command string for the UI.
+    """
+    check_cmd, stage_cmd = artifact.git_commands
+    check = subprocess.run(['git', '-C', artifact.repo_dir, 'apply', '--check',
+                            artifact.patch_path], capture_output=True, text=True)
+    artifact.status = 'APPROVED'
+    if check.returncode != 0:
+        # Dirty tree: --check fails on the WIP working tree. Never force. Hand the
+        # human the exact two-step command (clean the tree first, or apply manually).
+        manual = f'{check_cmd} && {stage_cmd}'
+        return (f'[PENDING human action] patch did not apply cleanly (dirty tree). '
+                f'No staged change was made. Review then run manually:\n{manual}\n'
+                f'--- git apply --check output ---\n'
+                f'{check.stderr.strip() or check.stdout.strip()}')
+
+    stage = subprocess.run(['git', '-C', artifact.repo_dir, 'apply', '--cached',
+                            artifact.patch_path], capture_output=True, text=True)
+    if stage.returncode != 0:
+        return (f'[PENDING human action] apply --cached failed; nothing was staged.\n'
+                f'--- git output ---\n{stage.stderr.strip() or stage.stdout.strip()}')
+
+    msg = (f'[APPROVED] staged to git INDEX (no commit): '
+           f'{artifact.candidate_hash}\n{stage.stdout.strip()}')
+    if commit:
+        # commit -m (NOT -am): commits exactly the git INDEX — i.e. only the staged
+        # cut. -a would stage ALL tracked modifications and sweep unrelated WIP into
+        # the human's one irreversible commit, breaking the exact-patch guarantee.
+        c = subprocess.run(['git', '-C', artifact.repo_dir, 'commit', '-m',
+                            f'dna_cohort: promote {artifact.candidate_hash}'],
+                           capture_output=True, text=True)
+        msg += f'\n[committed] {c.stdout.strip() or c.stderr.strip()}'
+    return msg
 
 
-# Single-flight guard: a periodic tick (PHASE 2) and an on-demand call must not
+
+# Single-flight guard: a periodic tick and an on-demand call must not
 # double-scan the same 1400-file corpus concurrently.
 _RUN_LOCK = threading.Lock()
 _IN_PROGRESS = '[dna_cohort] a run is already in progress; result will not double-scan.'
 
 
+def package_repo_root() -> str:
+    """Git repo root for the serving package (``<repo>/agent_cascade/dna_cohort.py``).
+    Used as the default ``repo_dir`` when a caller does not supply one."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def run_and_report(telemetry_dir: str, *, workspace_root: str,
                    baseline_hash: str = DEFAULT_BASELINE_HASH,
                    stage_cut: bool = False,  # PHASE-2 cut-staging flag (renamed from ``prepare_cut`` to stop shadowing the module-level prepare_cut)
+                   candidate_content: str | None = None,  # human-supplied proposed new dna.py text, required to stage a cut
+                   repo_dir: str | None = None,  # git repo for the HEAD-based diff (defaults to the package root)
                    dry_run: bool = False) -> str:
     """Top-level sync orchestrator (single-flight guarded).
 
-    ``dry_run=True`` -> report only, no note/cut writes (the manual-pipeline
-    path; acceptance: "no regression to manual run"). ``stage_cut=True`` is a
-    PHASE-2 seam and raises. Returns the rendered report string.
+    ``dry_run=True`` -> report only, no note/cut writes (the manual-pipeline path;
+    acceptance: "no regression to manual run"). When ``stage_cut=True`` (and not a
+    dry run) and any cohort gates to ``CUT_CANDIDATE``, stage a human-approve-only
+    cut artifact for it via ``prepare_cut`` — which needs ``candidate_content`` (the
+    proposed new ``dna.py`` text); when that is None the report notes the cut could
+    not be staged. Staging NEVER commits/edits dna.py; ``apply_approved_cut`` is the
+    separate, human-triggered apply. Returns the rendered report string.
     """
-    if stage_cut:
-        raise NotImplementedError(
-            'stage_cut=True is PHASE 2 (auto-stage the promotion cut for '
-            'one-click approve); PHASE 1 runs the deterministic core only.')
     if not _RUN_LOCK.acquire(blocking=False):
         return _IN_PROGRESS
     try:
@@ -668,9 +848,41 @@ def run_and_report(telemetry_dir: str, *, workspace_root: str,
             new = update_note(old, rows, decisions, gaps, generated_at=generated_at)
             with open(note_path, 'w', encoding='utf-8') as fh:
                 fh.write(new)
+            if stage_cut:
+                report += _stage_cuts(rows, decisions, gaps, workspace_root,
+                                      candidate_content, repo_dir or package_repo_root(),
+                                      baseline_hash)
         return report
     finally:
         _RUN_LOCK.release()
+
+
+def _stage_cuts(rows: dict[str, CohortRow], decisions: dict[str, GateDecision],
+                gaps: list[LabelingGap], workspace_root: str,
+                candidate_content: str | None, repo_dir: str,
+                baseline_hash: str = DEFAULT_BASELINE_HASH) -> str:
+    """For every ``CUT_CANDIDATE`` cohort write a human-approve artifact. Returns a
+    markdown section to append to the report. NEVER commits or edits dna.py — only
+    writes the staged artifact under ``<workspace>/dna_cut_prep``."""
+    candidates = [ph for ph, d in decisions.items() if d.status == CUT_CANDIDATE]
+    if not candidates:
+        return ''
+    # Proposed corrective bump per candidate, sourced from the labeling gap (if any).
+    bump_by_hash = {h: g.proposed_bump for g in gaps for h in g.hashes}
+    lines = ['\n## Cut staging']
+    for ph in sorted(candidates):
+        if candidate_content is None:
+            lines.append(f'- `{ph}` CUT_CANDIDATE: **not staged** — `candidate_content` '
+                         'is required (the proposed new `dna.py` text) to prepare a cut.')
+            continue
+        art = prepare_cut(ph, repo_dir, decisions[ph], candidate_content,
+                          workspace_root=workspace_root,
+                          version_bump=bump_by_hash.get(ph),
+                          baseline_hash=baseline_hash)
+        lines.append(f'- `{ph}` cut staged at `{art.patch_path}` (status {art.status}). '
+                     'Human review + `apply_approved_cut` to stage-to-index; nothing committed.')
+    return '\n'.join(lines) + '\n'
+
 
 
 def _decide_all(rows: dict[str, CohortRow], baseline_hash: str) -> dict[str, GateDecision]:

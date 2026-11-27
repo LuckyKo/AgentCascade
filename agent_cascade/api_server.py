@@ -1426,6 +1426,44 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except Exception as e:  # noqa: BLE001 - the loop must never die
                 logger.debug(f"AFK idle nudge tick failed (non-critical): {e}")
 
+    def _dna_cohort_dirs() -> tuple[str, str]:
+        """Resolve (telemetry_dir, workspace_root) for the dna_cohort pipeline.
+        Uses the running collector's log dir when present, else the configured
+        workspace's telemetry subdir. Returns ('', '') when nothing is resolvable."""
+        if agent_pool and getattr(agent_pool, 'telemetry', None):
+            log_dir = str(getattr(agent_pool.telemetry, 'log_dir', '') or '')
+            if log_dir:
+                return log_dir, (os.path.dirname(log_dir.rstrip('\\/')) or log_dir)
+        return (os.path.join(settings.DEFAULT_WORKSPACE, 'telemetry'),
+                settings.DEFAULT_WORKSPACE)
+
+    async def _dna_cohort_loop():
+        """Periodic DNA-cohort accumulation pass.
+
+        Settings-gated + default OFF (the loop idles when disabled), long-interval
+        tick. Calls the pure sync core off the event loop via asyncio.to_thread so a
+        blocking full-scan never stalls the loop. It only PREPARES (stages a
+        human-approve cut on a CUT_CANDIDATE) — NEVER commits, reloads, or edits
+        dna.py; the apply stays human-triggered. Re-reads the settings each tick so a
+        live change takes effect without a restart. Single-flight guarded by the
+        module-level dna_cohort._RUN_LOCK.
+        """
+        from . import dna_cohort
+        while True:
+            try:
+                interval = settings.DNA_COHORT_INTERVAL_SECS
+                if settings.DNA_COHORT_LOOP_ENABLED:
+                    telemetry_dir, workspace_root = _dna_cohort_dirs()
+                    if telemetry_dir:
+                        await asyncio.to_thread(
+                            dna_cohort.run_and_report, telemetry_dir,
+                            workspace_root=workspace_root, stage_cut=True)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001 - the loop must never die
+                logger.debug(f'dna_cohort loop tick failed (non-critical): {e}')
+
     # ── Agent execution thread ────────────────────────────────────────────
 
     def run_agent_thread(history_for_agent, agent_runner, gen_id, loop, target_instance_name=None):
@@ -1658,6 +1696,10 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         # idle agent is re-nudged on the 5-min cadence, not just once (restores pre-v0.2.81
         # browser behavior). Reuses the same locked _afk_maybe_nudge, so no double-fire.
         asyncio.create_task(_afk_nudge_loop())
+        # Periodic DNA-cohort accumulation pass — settings-gated,
+        # default OFF (idles), long-interval, runs the scan off-loop via to_thread and
+        # only PREPARES human-approve cut artifacts. Never commits/reloads/edits dna.py.
+        asyncio.create_task(_dna_cohort_loop())
 
         if agent_pool is not None and settings.ENABLE_STACK_SWAP:
             try:
@@ -2409,38 +2451,68 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # ── API Router Endpoints ──────────────────────────────────────────────
     @app.post('/api/dna_cohort')
     @app.get('/api/dna_cohort')
-    async def api_dna_cohort():
-        """On-demand DNA-cohort analysis (BUG_0401 PHASE 1). Runs the
+    async def api_dna_cohort(request: Request, data: dict = None):
+        """On-demand DNA-cohort analysis. Runs the
         deterministic full-scan core over the live telemetry dir and returns the
-        per-cohort results report. PHASE 1 is strictly READ-ONLY: the report is
-        always rendered with dry_run=True (NO note/cut writes). Note-writes and
-        auto-prepare (prepare_cut) are PHASE 2 concerns and are intentionally not
-        exposed here. The blocking scan runs off the event loop via
-        asyncio.to_thread.
-        """
+        per-cohort results report. GET (or POST with an empty body) is strictly
+        READ-ONLY (dry_run=True, no writes — the manual-pipeline path). A POST body
+        with ``stage_cut: true`` AND ``candidate_content`` (the proposed new dna.py
+        text) additionally stages a human-approve-only cut artifact for any
+        CUT_CANDIDATE cohort. Staging NEVER commits/edits dna.py; applying is a
+        separate human action via ``POST /api/dna_cohort/approve``. The blocking
+        scan runs off the event loop via asyncio.to_thread. No token: this mirrors
+        ``/api/approve`` (CORS is permissive); the guardrail is the settings-gate +
+        no-auto-commit, not a token."""
         from . import dna_cohort
-        # Resolve the live telemetry dir from the running collector when present,
-        # else fall back to the configured workspace's telemetry subdir.
-        telemetry_dir = workspace_root = ''
-        if agent_pool and getattr(agent_pool, 'telemetry', None):
-            log_dir = str(getattr(agent_pool.telemetry, 'log_dir', '') or '')
-            if log_dir:
-                telemetry_dir = log_dir
-                workspace_root = os.path.dirname(log_dir.rstrip('\\/')) or log_dir
-        if not telemetry_dir:
-            from . import settings
-            workspace_root = settings.DEFAULT_WORKSPACE
-            telemetry_dir = os.path.join(workspace_root, 'telemetry')
+        telemetry_dir, workspace_root = _dna_cohort_dirs()
+        # GET is strictly read-only by the HTTP method itself (not just body-gated):
+        # force dry_run/stage off so only a POST can stage a cut.
+        is_get = request.method == 'GET'
+        stage = (not is_get) and bool((data or {}).get('stage_cut'))
+        candidate_content = (data or {}).get('candidate_content')
+        dry_run = not stage
         try:
             report = await asyncio.to_thread(
                 dna_cohort.run_and_report, telemetry_dir,
-                workspace_root=workspace_root, dry_run=True,
+                workspace_root=workspace_root, dry_run=dry_run,
+                stage_cut=stage, candidate_content=candidate_content,
             )
-            return {'report': report, 'dry_run': True}
-        except NotImplementedError as e:  # PHASE-2 seam — not a server bug
-            return JSONResponse(status_code=501, content={'message': str(e)})
+            return {'report': report, 'dry_run': dry_run, 'staged_cut': stage}
         except Exception as e:  # noqa: BLE001 — never let analysis break the API
             logger.error(f'dna_cohort run failed: {e}')
+            return JSONResponse(status_code=500, content={'message': str(e)})
+
+    @app.post('/api/dna_cohort/approve')
+    async def api_dna_cohort_approve(data: dict):
+        """HUMAN-ONLY apply of a staged DNA promotion cut. Rebuilds the staged
+        artifact for ``candidate_hash`` and calls ``apply_approved_cut`` — stages to
+        the git INDEX (``git apply --cached``), NO commit unless ``commit: true``. On
+        a dirty tree (the common case) it does NOT force; it returns the exact manual
+        command for the human. Never invoked by the periodic loop. Same auth posture
+        as ``/api/approve`` (no token)."""
+        from . import dna_cohort
+        candidate_hash = (data or {}).get('candidate_hash')
+        commit = bool((data or {}).get('commit'))
+        if not candidate_hash:
+            return JSONResponse(status_code=400,
+                                content={'message': 'candidate_hash required'})
+        telemetry_dir, workspace_root = _dna_cohort_dirs()
+        repo_dir = dna_cohort.package_repo_root()
+        # Single source of truth for the artifact layout + git commands (matches
+        # exactly what prepare_cut wrote on disk).
+        artifact = dna_cohort.CutArtifact.reconstruct(
+            candidate_hash, repo_dir, workspace_root)
+        if not os.path.exists(artifact.patch_path):
+            return JSONResponse(status_code=404, content={
+                'message': f'no staged cut for {candidate_hash!r} — POST /api/dna_cohort '
+                           'with stage_cut+candidate_content first'})
+        try:
+            # Human-triggered apply only; run the git calls off the event loop.
+            result = await asyncio.to_thread(
+                dna_cohort.apply_approved_cut, artifact, commit=commit)
+            return {'result': result, 'status': artifact.status, 'committed': commit}
+        except Exception as e:  # noqa: BLE001
+            logger.error(f'dna_cohort approve failed: {e}')
             return JSONResponse(status_code=500, content={'message': str(e)})
 
 

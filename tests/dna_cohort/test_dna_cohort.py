@@ -7,6 +7,7 @@ from the code under test rather than hardcoded (single source of truth).
 import json
 import os
 import re
+import subprocess
 
 import pytest
 
@@ -296,14 +297,172 @@ def test_run_and_report_dry_run_no_writes(tmp_path):
     assert not os.path.exists(os.path.join(workspace, 'dna_cut_prep'))
 
 
-def test_prepare_cut_is_phase2_notimplemented(tmp_path):
-    """PHASE-2 seams must refuse to run rather than silently no-op a cut."""
-    with pytest.raises(NotImplementedError):
-        dc.prepare_cut('hash', str(tmp_path), _decision())
-    with pytest.raises(NotImplementedError):
-        dc.apply_approved_cut(dc.CutArtifact('h', 'p', 'c', 'e', 'NEW'))
-    with pytest.raises(NotImplementedError):
-        dc.run_and_report(str(tmp_path), workspace_root=str(tmp_path), stage_cut=True)
+# ── PHASE 2 — cut staging (HEAD-based diff), human-approve apply, gated loop ──
+
+_BASE_DNA = "DNA_VERSION: str = '1.1.0'\nBODY A\nBODY B\n"
+_CAND_DNA = "DNA_VERSION: str = '1.2.0'\nBODY A\nBODY B\nNEW INSTRUCTION\n"
+_CAND_DECISION = dc.GateDecision(status='CUT_CANDIDATE', failing=(), reasoning='', deltas={})
+
+
+def _git(repo, *args):
+    return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
+
+
+def _make_repo(tmp_path, dna_content):
+    """Init a temp git repo with ``agent_cascade/prompts/dna.py`` committed.
+    core.autocrlf=false so patch context matches byte-for-byte (no CRLF desync)."""
+    repo = str(tmp_path / 'repo')
+    prompts = os.path.join(repo, 'agent_cascade', 'prompts')
+    os.makedirs(prompts, exist_ok=True)
+    _git(repo, 'init')
+    for k, v in [('user.email', 't@t'), ('user.name', 't'), ('core.autocrlf', 'false')]:
+        _git(repo, 'config', k, v)
+    fp = os.path.join(prompts, 'dna.py')
+    with open(fp, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write(dna_content)
+    _git(repo, 'add', '-A')
+    assert _git(repo, 'commit', '-m', 'base').returncode == 0
+    return repo, fp
+
+
+def _commits(repo):
+    return len(_git(repo, 'log', '--oneline').stdout.strip().splitlines())
+
+
+def test_prepare_cut_vs_head(tmp_path):
+    """HEAD-based patch contains ONLY the candidate change — never the dirty-tree WIP."""
+    repo, fp = _make_repo(tmp_path, _BASE_DNA)
+    with open(fp, 'a', encoding='utf-8', newline='\n') as fh:
+        fh.write('WIP NOISE LINE\n')  # dirty working tree, not committed
+    ws = str(tmp_path / 'ws')
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA,
+                         workspace_root=ws, version_bump='1.2.0')
+    assert art.status == 'PENDING'
+    with open(art.patch_path, encoding='utf-8') as fh:
+        patch = fh.read()
+    assert 'NEW INSTRUCTION' in patch
+    assert '+DNA_VERSION' in patch and '1.2.0' in patch
+    assert 'WIP NOISE' not in patch            # WIP noise excluded (diff vs HEAD)
+    for p in (art.patch_path, art.canary_plan_path, art.gate_evidence_path):
+        assert os.path.exists(p)
+    prep = os.path.join(ws, 'dna_cut_prep', 'cand')
+    assert os.path.basename(prep) in art.patch_path
+
+
+def test_apply_approved_cut_no_commit(tmp_path):
+    """Clean tree: apply_approved_cut stages to the INDEX, creates NO commit."""
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)   # clean tree
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA,
+                         workspace_root=str(tmp_path / 'ws'))
+    before = _commits(repo)
+    result = dc.apply_approved_cut(art, commit=False)
+    assert art.status == 'APPROVED'
+    assert 'staged to git INDEX' in result
+    assert _commits(repo) == before            # no new commit
+    assert 'NEW INSTRUCTION' in _git(repo, 'diff', '--cached').stdout
+
+
+def test_apply_dirty_tree_returns_manual_command(tmp_path):
+    """Dirty tree where --check fails: return the manual command, force nothing."""
+    repo, fp = _make_repo(tmp_path, _BASE_DNA)
+    with open(fp, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write("DNA_VERSION: str = '1.1.0'\nBODY A MODIFIED\nBODY B\n")  # breaks context
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA,
+                         workspace_root=str(tmp_path / 'ws'))
+    result = dc.apply_approved_cut(art, commit=False)
+    assert 'PENDING human action' in result
+    assert 'apply --check' in result and 'apply --cached' in result
+    assert _git(repo, 'diff', '--cached').stdout == ''  # nothing was staged
+
+
+def test_canary_plan_content(tmp_path):
+    """canary_plan.md carries the K=5 window + the three rollback triggers."""
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA,
+                         workspace_root=str(tmp_path / 'ws'))
+    with open(art.canary_plan_path, encoding='utf-8') as fh:
+        plan = fh.read()
+    assert 'K = 5' in plan
+    assert 'tool-acc' in plan and 'hard-failure' in plan and '25%' in plan
+
+
+def test_commit_true_commits_only_staged_cut(tmp_path):
+    """commit=True uses `commit -m` (index only): the commit contains ONLY the staged
+    cut, NEVER an unrelated modified tracked file — the `commit -am` footgun fix."""
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)
+    # Track an unrelated file (clean), then dirty it in the working tree. `commit -am`
+    # would sweep it into the cut commit; `commit -m` (index only) must not.
+    wip_fp = os.path.join(repo, 'wip.py')
+    with open(wip_fp, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('x = 1\n')
+    _git(repo, 'add', 'wip.py'); _git(repo, 'commit', '-m', 'track wip')
+    with open(wip_fp, 'w', encoding='utf-8', newline='\n') as fh:
+        fh.write('x = 2  # WIP\n')  # modified, unstaged
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA,
+                         workspace_root=str(tmp_path / 'ws'))
+    assert _commits(repo) == 2  # base + wip
+    result = dc.apply_approved_cut(art, commit=True)
+    assert '[committed]' in result
+    names = _git(repo, 'show', '--name-only', '--pretty=format:', 'HEAD').stdout
+    assert 'dna.py' in names            # the staged cut is committed
+    assert 'wip.py' not in names        # unrelated WIP was NOT swept in
+    assert 'wip.py' in _git(repo, 'status', '--porcelain').stdout  # still unstaged WIP
+
+
+def test_canary_plan_threads_baseline_hash(tmp_path):
+    """A non-default baseline_hash must flow through to the canary plan 'cut from' line."""
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA,
+                         workspace_root=str(tmp_path / 'ws'),
+                         baseline_hash='deadbeef00000000')
+    with open(art.canary_plan_path, encoding='utf-8') as fh:
+        plan = fh.read()
+    assert 'deadbeef00000000' in plan
+    assert dc.DEFAULT_BASELINE_HASH not in plan
+
+
+def test_loop_settings_gated_default_off():
+    """The periodic loop is gated OFF by default (the cut stays human-approved)."""
+    from agent_cascade import settings
+    assert settings.DNA_COHORT_LOOP_ENABLED is False
+    assert settings.DNA_COHORT_INTERVAL_SECS > 0
+
+
+def test_stage_cut_requires_candidate(tmp_path, monkeypatch):
+    """stage_cut=True with no candidate_content: report notes the requirement, nothing written."""
+    d = _corpus(tmp_path, {
+        'telemetry_c.jsonl': [_session_start('CAND', 'S1'), _turn_end('CAND'), _turn_end('CAND')]})
+    monkeypatch.setattr(dc, '_decide_all',
+                        lambda rows, bh: {'CAND': _CAND_DECISION})
+    ws = str(tmp_path / 'ws')
+    os.makedirs(ws, exist_ok=True)
+    report = dc.run_and_report(d, workspace_root=ws, baseline_hash='CAND',
+                               stage_cut=True, candidate_content=None)
+    assert 'not staged' in report
+    assert not os.path.exists(os.path.join(ws, 'dna_cut_prep'))
+
+
+def test_stage_cut_stages_artifact(tmp_path, monkeypatch):
+    """stage_cut=True + candidate_content on a CUT_CANDIDATE writes the artifact."""
+    d = _corpus(tmp_path, {
+        'telemetry_c.jsonl': [_session_start('CAND', 'S1'), _turn_end('CAND'), _turn_end('CAND')]})
+    monkeypatch.setattr(dc, '_decide_all',
+                        lambda rows, bh: {'CAND': _CAND_DECISION})
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)
+    ws = str(tmp_path / 'ws')
+    os.makedirs(ws, exist_ok=True)
+    report = dc.run_and_report(d, workspace_root=ws, baseline_hash='CAND',
+                               stage_cut=True, candidate_content=_CAND_DNA, repo_dir=repo)
+    assert 'cut staged' in report
+    assert os.path.exists(os.path.join(ws, 'dna_cut_prep', 'CAND', 'cut.patch'))
+
+
+def test_prepare_cut_rejects_non_candidate(tmp_path):
+    """prepare_cut refuses to run unless the cohort is CUT_CANDIDATE (gate never bypassed)."""
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)
+    ready = dc.GateDecision(status='READY', failing=(), reasoning='', deltas={})
+    with pytest.raises(ValueError):
+        dc.prepare_cut('cand', repo, ready, _CAND_DNA, workspace_root=str(tmp_path / 'ws'))
 
 
 def test_coverage_reports_real_total_including_unlabeled(tmp_path):
@@ -334,3 +493,20 @@ def test_coverage_reports_real_total_including_unlabeled(tmp_path):
     assert dropped_n == 2           # non-zero: the previously-always-zero line
     assert labeled_n + dropped_n == total_seen  # total = labeled + dropped
     assert files_n == 1
+
+
+def test_reconstruct_matches_prepare_cut_layout(tmp_path):
+    """CutArtifact.reconstruct is the single source of truth: it must yield the exact
+    on-disk paths + git_commands that prepare_cut writes, so the human apply endpoint
+    can rehydrate a staged artifact without re-hardcoding the layout."""
+    repo, _ = _make_repo(tmp_path, _BASE_DNA)
+    ws = str(tmp_path / 'ws')
+    art = dc.prepare_cut('cand', repo, _CAND_DECISION, _CAND_DNA, workspace_root=ws)
+    rebuilt = dc.CutArtifact.reconstruct('cand', repo, ws)
+    assert rebuilt.patch_path == art.patch_path
+    assert rebuilt.canary_plan_path == art.canary_plan_path
+    assert rebuilt.gate_evidence_path == art.gate_evidence_path
+    assert rebuilt.git_commands == art.git_commands
+    assert rebuilt.status == 'PENDING'
+    # the reconstructed check command must actually be runnable against the staged patch
+    assert os.path.exists(rebuilt.patch_path)
