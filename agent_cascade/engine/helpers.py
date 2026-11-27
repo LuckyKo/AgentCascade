@@ -237,15 +237,22 @@ def _get_active_functions_from_template(template, instance=None, pool=None) -> l
         live_disabled = pool.get_ui_disabled_tools_for_agent(agent_name, agent_type)
         disabled |= set(live_disabled or [])
 
-    # Independent class-scoped security floor. The Admin read-only floor must hold even when the
-    # mutable _generate_cfg_override carrier is rebuilt or nulled without it: run_loop pops
-    # disabled_tools on a final turn and state_builder._apply_ui_config re-bakes the override
-    # without the floor, so the one-shot merge in system_agent can be lost before this gate reads
-    # it. This union re-applies the floor from the already-resolved agent_type/class every call,
-    # so enforcement no longer depends on the carrier surviving. Class-scoped to 'admin' only.
-    from agent_cascade.constants import ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS
-    if (agent_type or '').lower() == 'admin':
+    # Independent class-scoped security floor. The read-only oversight floor (Admin, Reviewer)
+    # must hold even when the mutable _generate_cfg_override carrier is rebuilt or nulled without
+    # it: run_loop pops disabled_tools on a final turn and state_builder._apply_ui_config re-bakes
+    # the override without the floor, so the one-shot merge in system_agent can be lost before this
+    # gate reads it. This union re-applies the floor from the already-resolved agent_type/class
+    # every call, so enforcement no longer depends on the carrier surviving. Class-scoped to
+    # 'admin' + 'reviewer'.
+    from agent_cascade.constants import (
+        ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS,
+        REVIEWER_CLASS_READ_ONLY_DISABLED_TOOLS,
+    )
+    _fc = (agent_type or '').lower()
+    if _fc == 'admin':
         disabled |= ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS
+    elif _fc == 'reviewer':
+        disabled |= REVIEWER_CLASS_READ_ONLY_DISABLED_TOOLS
 
     # Defensive: template.function_map may be None for templates without tools
     func_map = getattr(template, 'function_map', None)

@@ -159,7 +159,18 @@ ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS: frozenset[str] = frozenset({
     'delete_file',        # Delete files
     'copy_file',          # Copy files/directories
     're_indent',          # Re-indent file blocks (mutates files on disk)
+    # A read-only oversight (Admin) agent must not spawn sub-agents: children inherit the
+    # caller's permissive toolset, so spawning would defeat the read-only guarantee.
+    'call_agent',         # Delegate tasks to specialized agent instances
 })
+
+# Read-only floor for the Reviewer class (SEC-03): mirrors the Admin read-only
+# floor plus the __all_mcp_tools__ sentinel (block all dynamic MCP tools).
+# Defined as a superset of ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS so the two stay in
+# lock-step (DRY) — a Reviewer, like an Admin, is read-only oversight and must not
+# mutate the host/filesystem, run shell/code, spawn sub-agents, or reach MCP tools.
+REVIEWER_CLASS_READ_ONLY_DISABLED_TOOLS: frozenset[str] = (
+    ADMIN_CLASS_READ_ONLY_DISABLED_TOOLS | frozenset({'__all_mcp_tools__'}))
 
 # Tools kept ENABLED by default for dynamically loaded agents:
 # - call_agent, dismiss_agent — essential for agent coordination
