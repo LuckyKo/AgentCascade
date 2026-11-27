@@ -397,9 +397,11 @@ SOFT_CONTINUE_NUDGE_ENABLED: bool = os.getenv('AGENT_CASCADE_SOFT_CONTINUE_NUDGE
 
 # Trust boundary (OWASP LLM01, indirect prompt injection): when ON, untrusted tool
 # outputs are wrapped in <tag> delimiters and a standing system-prompt line tells the
-# model to treat delimited content as data, never instructions. Default OFF — no
-# behavior change unless AGENT_CASCADE_UNTRUSTED_TOOL_OUTPUT=1.
-UNTRUSTED_TOOL_OUTPUT_WRAPPER: bool = os.getenv('AGENT_CASCADE_UNTRUSTED_TOOL_OUTPUT', '0') == '1'
+# model to treat delimited content as data, never instructions. Default ON — untrusted
+# tool output is wrapped by default; set AGENT_CASCADE_UNTRUSTED_TOOL_OUTPUT=0 to
+# opt out. ON-by-default is the safe posture, per the 2026-11-27 security audit
+# (SEC-04), which supersedes the earlier opt-in (default OFF) stance.
+UNTRUSTED_TOOL_OUTPUT_WRAPPER: bool = os.getenv('AGENT_CASCADE_UNTRUSTED_TOOL_OUTPUT', '1') == '1'
 # Single source of truth for the trust-boundary delimiter tag, shared by the
 # tool-output wrapper (engine/tool_execution.py) and the system-prompt line
 # (engine/turn_setup.py).

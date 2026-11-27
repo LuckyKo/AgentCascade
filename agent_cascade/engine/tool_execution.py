@@ -33,11 +33,13 @@ from agent_cascade.utils.pool_validation import validate_message_pool
 
 
 # Tools whose STRING output is attacker-controllable (file/web/log/shell/code reads).
-# v1 allowlist. Excluded: view_media/view_image (multimodal), list_dir (filenames
-# only), calculate (pure arithmetic), call_agent (inter-agent), and every editor tool.
+# v1 allowlist. web_search is a web fetch whose result string is attacker-controllable,
+# so it is wrapped like web_extractor. Excluded: view_media/view_image (multimodal),
+# list_dir (filenames only), calculate (pure arithmetic), call_agent (inter-agent), and
+# every editor tool.
 _UNTRUSTED_TOOLS: frozenset[str] = frozenset({
-    'read_file', 'grep', 'web_extractor', 'read_logs', 'shell_cmd', 'code_interpreter',
-    'call_cli_agent',
+    'read_file', 'grep', 'web_extractor', 'web_search', 'read_logs', 'shell_cmd',
+    'code_interpreter', 'call_cli_agent',
 })
 
 # Per-member cap for the full args sent to the security guard in a grouped edit batch.
