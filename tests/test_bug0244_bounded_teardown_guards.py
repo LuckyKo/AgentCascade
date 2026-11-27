@@ -186,7 +186,8 @@ class TestRootWatchdogGap:
         Encodes the §5 scope map as an executable fact so a future root-watchdog change is FORCED
         to update it instead of silently altering what the DMS can see. Asserts:
           (a) capacity>1 pools are out of scope (holders[0] would be arbitrary) — functional, and
-          (b) the documented root-invisible invariant is still written verbatim in the predicate."""
+          (b) the documented holder-pass root posture (never-yields-a-root, with the BUG_0433
+        slot-holding-root exception) is still written verbatim in the predicate."""
         # (a) functional: aged holder on a capacity>1 pool is skipped (out of scope).
         inst = _FakeInst('H', last_activity=_old(), llm_active=False)
         wide = SlotPool(key='wide2', capacity=2)
@@ -195,11 +196,13 @@ class TestRootWatchdogGap:
         IdleManager(pool)._run_holder_dms()
         assert pool.terminated == [], 'capacity>1 pool must remain out of holder-DMS scope'
 
-        # (b) the root-invisible invariant is still present verbatim in the predicate source.
+        # (b) the corrected holder-pass posture is present verbatim in the predicate source.
+        # BUG_0245 pinned that the holder registry never yields a root; BUG_0433 documented the
+        # exception (a ROOT holding the conc=0 shared slot, e.g. a sync call_agent self-deadlock).
         src = inspect.getsource(IdleManager._evaluate_wedged_holder)
-        assert 'the holder registry never yields one' in src, (
-            "BUG_0245: the root/orchestrator 'holder registry never yields one' invariant was removed "
-            'or renamed — if a root watchdog was added, update this pin and BUG_0245 together.')
+        assert 'a ROOT CAN hold the conc=0 shared slot' in src, (
+            'BUG_0245/BUG_0433: the holder-pass slot-holding-root exception was removed or renamed — '
+            'update this pin and both bugs together if the holder-pass root posture changes again.')
         src_run = inspect.getsource(IdleManager._run_holder_dms)
         assert 'capacity != 1' in src_run, (
             'BUG_0245: the capacity!=1 scope-skip was removed; reconcile against the holder-DMS scope contract.')

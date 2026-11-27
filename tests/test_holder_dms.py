@@ -28,7 +28,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from agent_cascade.slot_queue import SlotPool, _holder_activity_context
-from agent_cascade.pool.idle_manager import IdleManager
+from agent_cascade.pool.idle_manager import IdleManager, is_dms_wedge_reason
 from agent_cascade.llm.schema import Message
 
 WINDOW = 2.0  # test window; production is 300s
@@ -47,7 +47,8 @@ class _FakeInst:
     """Minimal stand-in for an AgentInstance: only the attributes the DMS reads."""
 
     def __init__(self, name, agent_class='coder', last_activity=0.0,
-                 llm_activity=0.0, llm_active=False, state_name='RUNNING'):
+                 llm_activity=0.0, llm_active=False, state_name='RUNNING',
+                 parent_instance=None):
         self.instance_name = name
         self.agent_class = agent_class
         self.last_activity = last_activity
@@ -55,6 +56,11 @@ class _FakeInst:
         self._llm_call_active = llm_active
         self.state = _State(state_name)
         self._in_blocking_tool = None
+        # parent_instance: None = ROOT (the act loop tags it with a recoverable wedge reason);
+        # a set value = child holder (stays reason-less on the child_runner/dismissal path).
+        self.parent_instance = parent_instance
+        # Written by the DMS act loop for a wedged ROOT (BUG_0308/BUG_0433); None = no reason tagged.
+        self._terminated_reason = None
 
 
 class _FakeOM:
@@ -149,6 +155,43 @@ class TestRetryLoopWedge:
         im, pool, _, _ = _build(inst)
         im._run_holder_dms()
         assert pool.terminated == ['H'], f"expected termination, got {pool.terminated}"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# BUG_0433 — the holder pass can collect a slot-holding ROOT; the act loop must
+# tag ONLY a root with the recoverable reason (children stay reason-less).
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestHolderPassRootGetsRecoverableReason:
+    """BUG_0433: ``_evaluate_wedged_holder`` has no ``parent_instance`` guard, so it can collect a
+    ROOT that holds the conc=0 slot (e.g. a sync ``call_agent`` self-deadlock, BUG_0430). The root
+    pass then skips it (already in ``to_terminate``), so the act loop is the only site that can tag
+    it — and it must tag a ROOT (recoverable reason) while leaving a child holder reason-less."""
+
+    def test_slot_holding_root_holder_gets_recoverable_reason(self):
+        """A wedged ROOT holder (parent_instance=None) collected by the holder pass is now tagged
+        with a machine-readable recoverable reason. Reverts to no-reason (the bug) if the act-loop
+        ROOT re-fetch is removed."""
+        inst = _FakeInst('H', last_activity=_old(), llm_active=False)  # parent_instance=None = ROOT
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f"slot-holding ROOT holder not terminated: {pool.terminated}"
+        assert isinstance(inst._terminated_reason, str) and inst._terminated_reason, (
+            f"slot-holding ROOT must carry a reason, got {inst._terminated_reason!r}")
+        assert is_dms_wedge_reason(inst._terminated_reason), (
+            f"reason must be a self-describing dms-wedge, got {inst._terminated_reason!r}")
+
+    def test_child_holder_stays_reason_less(self):
+        """Same wedge posture but a CHILD holder (parent_instance set): terminated by the holder
+        pass yet left reason-less, on the existing child_runner/dismissal recovery path. Fails if
+        the ROOT guard in the act loop is dropped and a child wrongly gets a root-style reason."""
+        inst = _FakeInst('H', last_activity=_old(), llm_active=False,
+                         parent_instance=_FakeInst('Main'))  # parent_instance set = child
+        im, pool, _, _ = _build(inst)
+        im._run_holder_dms()
+        assert pool.terminated == ['H'], f"child holder not terminated: {pool.terminated}"
+        assert inst._terminated_reason is None, (
+            f"child holder must stay reason-less, got {inst._terminated_reason!r}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

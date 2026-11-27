@@ -370,8 +370,10 @@ class IdleManager:
 
         to_terminate = []
         # Provenance for BUG_0308 fix B: name -> inst for ROOT-pass wedges only. The act loop tags
-        # only these with the recoverable wedge reason; holder-pass names (already in to_terminate) are
-        # excluded, so holders keep the existing child_runner/dismissal recovery path unchanged.
+        # these with the recoverable wedge reason. Holder-pass names are not in this dict, BUT a
+        # slot-holding ROOT the holder pass collected is re-fetched and tagged in the act loop
+        # (BUG_0433); child holders (parent_instance set) stay reason-less on the existing
+        # child_runner/dismissal recovery path.
         root_wedges: dict = {}
 
         # ── Holder pass: conc=0 / capacity==1 slot holders resolved from the scheduler's pool
@@ -422,9 +424,17 @@ class IdleManager:
             # rescue it instead of leaving the pool permanently IDLE. The marker is read here (no locks
             # held — same discipline as terminate) via the shared _resolve_wedge_marker, so it reflects
             # the same decode as guard #7; if the parked thread unwinds in between, the reason degrades
-            # to 'no resolvable bound' (harmless, diagnostic only). Holders are not in root_wedges, so
-            # this is inert for holder terminations.
+            # to 'no resolvable bound' (harmless, diagnostic only). A slot-holding ROOT collected by the
+            # HOLDER pass is likewise tagged here (BUG_0433, below); child holders stay reason-less.
             wedge_inst = root_wedges.get(name)
+            if wedge_inst is None:
+                # BUG_0433: a slot-holding ROOT collected by the HOLDER pass (which assumes holders are
+                # children and never tags a reason) is a root (parent_instance is None) — tag it with the
+                # recoverable wedge reason like a root-pass wedge, so the resume re-arm can rescue it.
+                # Children (parent_instance set) keep the reason-less child_runner/dismissal path.
+                _inst = self.pool.get_instance(name)
+                if _inst is not None and getattr(_inst, 'parent_instance', None) is None:
+                    wedge_inst = _inst
             if wedge_inst is not None:
                 resolved = _resolve_wedge_marker(wedge_inst)
                 tool_name = resolved[0] if resolved else '?'
@@ -456,9 +466,11 @@ class IdleManager:
         """
         holder_name = ctx['holder_name']
 
-        # No `parent_instance is None` guard here (unlike _is_idle): a parent/orchestrator
-        # can never appear as a conc=0 slot holder — it is the root that OWNS instances, not a
-        # scheduler slot holder — so the holder registry never yields one.
+        # No `parent_instance is None` guard here (unlike _is_idle): a parent/orchestrator normally OWNS
+        # instances rather than holding a conc=0 slot, so the holder registry rarely yields one. BUG_0433
+        # exception: a ROOT CAN hold the conc=0 shared slot (e.g. a sync call_agent self-deadlock,
+        # BUG_0430) — the holder pass collects it, and the act loop tags it with a recoverable reason
+        # when it is a root (parent_instance is None).
 
         # Only a live RUNNING holder can be wedged (IDLE/TERMINATED → terminate would be a no-op).
         if ctx.get('holder_state') != 'RUNNING':
