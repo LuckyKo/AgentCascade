@@ -21,6 +21,7 @@ import sys
 import os
 import threading
 import time
+import pytest
 from unittest.mock import MagicMock, patch
 
 # Ensure the project root is importable regardless of how pytest is invoked.
@@ -702,6 +703,19 @@ def _acquire_with_llm_age(inst, age_s):
 
 class TestEpsilonGateReal:
     """The REAL Gate 5b (_REUSE_IDLE_EPSILON) exercised end-to-end — no mocking of acquire."""
+
+    @pytest.fixture(autouse=True)
+    def _large_epsilon(self, monkeypatch):
+        """Make the boundary test deterministic.
+
+        The gate compares a real wall-clock age against ``_REUSE_IDLE_EPSILON`` (production 0.1 s).
+        The real-acquire setup time (ms-scale) is added on top of the stamped gap, so with a tiny
+        epsilon the ``0.9 * epsilon`` gap can be pushed past the boundary -> flaky. Scale the
+        constant to 10 s so the setup time is negligible against every gap (3 / 9 / 20 s), keeping
+        the test deterministic while still driving the REAL gate (no mocking of acquire).
+        """
+        import agent_cascade.engine.system_agent as _sa
+        monkeypatch.setattr(_sa, '_REUSE_IDLE_EPSILON', 10.0)
 
     def test_recent_activity_within_epsilon_falls_back(self):
         """A recently-active instance (age = 0.3 * epsilon, inside the blocking band) must FALL BACK
