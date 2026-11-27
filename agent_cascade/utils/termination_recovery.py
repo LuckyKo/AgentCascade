@@ -10,7 +10,9 @@ This helper re-arms ONLY an instance whose termination was recorded as recoverab
 i.e. the loop detector wrote a machine-readable reason onto it
 (``inst._terminated_reason``, set in ``engine/llm_call.py``). Dismissals, cascade
 teardowns, and user Stops leave ``_terminated_reason`` unset, so they stay dead
-(the "TERMINATED must stay dead" contract).
+(the "TERMINATED must stay dead" contract). An explicit ``force=True`` user-message
+resume overrides the reason gate too (BUG_0432) to revive a reason-less TERMINATED
+ROOT; the stay-dead contract holds for every non-user path, which never passes force.
 
 Mirrors ``_reset_terminated_compressor_for_retry`` (BUG_0001,
 ``compression/agent_invoker.py``). Lock order: per-instance ``_state_lock``, released
@@ -48,21 +50,31 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str, force: bool
     BUG_0431: when ``force=True`` (an explicit user-message resume, where pool._run_generation has
     already been bumped so any parked thread is generation-superseded), the quiescence gate is
     SKIPPED and a stale ``_in_blocking_tool`` marker is cleared — the durable generation gate, not
-    the marker, is what protects the live run. ``force`` does NOT bypass the reason gate below.
+    the marker, is what protects the live run.
+
+    BUG_0432: ``force=True`` ALSO lifts the reason gate below, so a forced re-arm revives a TERMINATED
+    ROOT regardless of ``_terminated_reason``. A ROOT killed by the DMS holder pass carries no
+    recoverable reason (that pass writes none), which otherwise makes an in-process resume permanently
+    dead until a full restart. A user-message resume is an explicit intent to continue, so it overrides
+    a stale TERMINATED state; the "TERMINATED stays dead" contract is preserved for all NON-user paths
+    because they never pass ``force=True``.
 
     Args:
         pool: The AgentPool (provides ``get_instance``, ``terminated_instances``,
             ``_pool_lock``).
         instance_name: The instance to re-arm.
         origin: Caller label for the log line (e.g. ``"user-message"``).
-        force: Skip the DMS-wedge parked-thread quiescence gate and clear any stale
-            ``_in_blocking_tool`` marker (BUG_0431). Default False preserves BUG_0308 deferral.
-            Does NOT lift the reason gate (a reason-less termination still stays dead).
+        force: Lift BOTH gates — skip the DMS-wedge parked-thread quiescence gate and clear any
+            stale ``_in_blocking_tool`` marker (BUG_0431), AND bypass the reason gate to revive a
+            reason-less TERMINATED ROOT (BUG_0432). Default False preserves the BUG_0308/0205
+            deferral and the "TERMINATED stays dead" contract.
 
     Returns:
         True when re-armed; False when the instance is absent, is a child (has a
-        parent), is not terminated, or was terminated for a non-recoverable reason
-        (dismissal, cascade teardown, user Stop) — in which case it is left dead.
+        parent), is not terminated, or — with force=False — was terminated for a
+        non-recoverable reason (dismissal, cascade teardown, user Stop), in which
+        case it is left dead. force=True (user-message resume) revives even a
+        reason-less TERMINATED ROOT (BUG_0432).
     """
     # Normalize the name (mirrors terminate_instance, pool/lifecycle.py:232):
     # pool.get_instance() strips the name, but the discard below must use the
@@ -77,16 +89,31 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str, force: bool
     if getattr(inst, 'parent_instance', None) is not None:
         return False
 
-    # Only loop-terminations are recoverable; dismissals/teardowns/Stop leave this unset.
+    # Reason gate: a reason-less termination (dismissal / cascade teardown / user Stop) stays dead by
+    # default, BUT an explicit force=True user-message resume lifts this gate too (BUG_0432). A ROOT
+    # killed by the DMS HOLDER pass (idle_manager) carries NO recoverable reason — that pass never
+    # writes one, and the reason-writing root pass skips any name already collected — so without this
+    # bypass such a root is permanently dead in-process until a full restart. Only the user-message
+    # resume path passes force=True, so the "TERMINATED stays dead" contract is preserved for every
+    # NON-user path (Stop / dismissal / teardown / loop-detector never call this helper).
     reason = getattr(inst, '_terminated_reason', None)
-    if not isinstance(reason, str) or not reason:
+    if not force and (not isinstance(reason, str) or not reason):
         # Diagnostic only for a genuinely-dead root: a healthy IDLE instance also has no reason and
         # returns False on every user message — that is the normal no-op path, not a refusal to log.
+        # Scoped to force=False re-arms: a forced re-arm proceeds past this gate instead of refusing.
         if getattr(inst, 'is_terminated', False) or getattr(inst, 'state', None) == AgentState.TERMINATED:
             logger.warning(
                 f"[REARM] '{instance_name}' re-arm REFUSED (reason gate): no recoverable "
                 f"_terminated_reason (value={reason!r}) — 'TERMINATED stays dead' (origin={origin}, force={force})."
             )
+        return False
+
+    # Idempotency / no-op guard (required by BUG_0432): previously the reason gate below caught a
+    # reason-less IDLE (healthy) instance and returned False. Now that force=True lifts that gate, we
+    # must explicitly require the instance to actually be terminated, otherwise a second forced call
+    # on an already-IDLE root would fall through to the reset block, re-run it, and log a spurious
+    # success. A healthy (non-terminated) root is a silent no-op — no log, return False.
+    if not (getattr(inst, 'is_terminated', False) or getattr(inst, 'state', None) == AgentState.TERMINATED):
         return False
 
     # BUG_0308: a DMS wedge-termination records a recoverable reason, but the wedged root's
@@ -151,6 +178,7 @@ def rearm_terminated_instance(pool, instance_name: str, origin: str, force: bool
         pool.terminated_instances.discard(instance_name)
 
     logger.warning(
-        f"[REARM] '{instance_name}' -> IDLE for new run (BUG_0205): {reason} (origin={origin})"
+        f"[REARM] '{instance_name}' -> IDLE for new run (BUG_0205): "
+        f"{reason if reason else 'reason-less (force)'} (origin={origin})"
     )
     return True

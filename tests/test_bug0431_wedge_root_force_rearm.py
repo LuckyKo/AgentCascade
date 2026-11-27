@@ -10,8 +10,9 @@ TERMINATED and the whole session is dead (no in-process recovery short of a full
 Fix: an explicit user-message resume has already bumped ``pool._run_generation``
 (run_agent_unified), so any parked thread is generation-superseded and cannot touch the live run's
 state — that is the durable protection. ``rearm_terminated_instance(..., force=True)`` therefore
-skips the quiescence gate and clears the stale marker. The reason gate is UNCHANGED: a reason-less
-termination (Stop / dismissal / teardown) still stays dead.
+skips the quiescence gate and clears the stale marker. NOTE (BUG_0432): ``force`` now ALSO lifts the
+reason gate, so a reason-less TERMINATED ROOT revives on a forced resume; only the DEFAULT
+(force=False) path still refuses a reason-less termination.
 
 Self-contained — no LLM or API server required.
 """
@@ -142,25 +143,30 @@ def test_default_force_defers_wedge_with_stale_marker(caplog):
 
 
 # ══════════════════════════════════════════════
-# 3. force does NOT lift the reason gate: a reason-less termination stays dead
+# 3. BUG_0432: force DOES lift the reason gate — a reason-less TERMINATED ROOT revives
+#    (was: BUG_0431 asserted force=False-only stays dead; the stay-dead contract now lives
+#     in test_bug0432's force=False test + test_bug0205/test_bug0308 reason-less tests.)
 # ══════════════════════════════════════════════
 
 
-def test_force_does_not_revive_reason_less_termination(caplog):
+def test_force_revives_reason_less_root(caplog):
     inst = _make_root('Main')
     pool = _FakePool(inst)
     _terminate_reasonless(inst, pool)
 
     with caplog.at_level(logging.WARNING):
-        assert rearm_terminated_instance(pool, 'Main', origin='user-message', force=True) is False
+        assert rearm_terminated_instance(pool, 'Main', origin='user-message', force=True) is True
 
-    assert inst.state == AgentState.TERMINATED       # 'TERMINATED stays dead' contract preserved
-    assert inst.is_terminated is True
-    assert 'Main' in pool.terminated_instances
+    # Revived on an explicit forced resume — no reason required.
+    assert inst.state == AgentState.IDLE          # force lifts the reason gate (BUG_0432)
+    assert inst.is_terminated is False
+    assert 'Main' not in pool.terminated_instances
 
-    # The reason-gate refusal is greppable.
-    assert any('re-arm REFUSED (reason gate)' in r.getMessage() and r.levelno == logging.WARNING
+    # Success line present; the reason-gate REFUSED refusal is NOT emitted for a forced re-arm.
+    assert any('-> IDLE for new run' in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records), [r.getMessage() for r in caplog.records]
+    assert not any('re-arm REFUSED (reason gate)' in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
 
 
 # ══════════════════════════════════════════════
