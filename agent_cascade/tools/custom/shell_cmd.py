@@ -919,10 +919,20 @@ class ShellCmd(BaseTool):
         strict = ShellMixin._is_safe_readonly_shell_command(command)
 
         # ── Restricted (system-invoked) agents: hard-reject non-read-only commands. ──
-        if not strict and self._is_restricted(agent_name):
-            return ('REJECTED: Command not allowed for system agents. '
-                    'Only read-only filesystem/git commands are permitted. '
-                    'Use __help to see allowed commands.')
+        if self._is_restricted(agent_name):
+            if not strict:
+                return ('REJECTED: Command not allowed for system agents. '
+                        'Only read-only filesystem/git commands are permitted. '
+                        'Use __help to see allowed commands.')
+            # SEC-06 (restricted exfil): mirror the operation_manager gate (shell.py) — a
+            # system-invoked agent has no human in the loop, so it must not reach the
+            # network. Conditionally-safe commands (curl / python / python3) are
+            # network-capable even in their "read-only" form (curl GET is a network read;
+            # a `python -c` can import a network module the marker set does not cover,
+            # e.g. ftplib / http.client / httpx). Deny them regardless of arg-scoping.
+            if ShellMixin._primary_is_network_capable(command):
+                return ('REJECTED: Network access (curl/python) is not allowed for system '
+                        'agents. Only read-only filesystem/git commands are permitted.')
 
         # Widened decision. A test stub whose operation_manager is a MagicMock cannot
         # produce a real (bool, list) decision; fall back to the strict bool so such

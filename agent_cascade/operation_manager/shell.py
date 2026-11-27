@@ -730,6 +730,40 @@ class ShellMixin:
         return False
 
     @staticmethod
+    def _primary_is_network_capable(command: str) -> bool:
+        """True when ANY chain segment's / pipeline stage's primary is a network-capable
+        command (curl / python / python3), including behind an ``env`` wrapper.
+
+        Scans every ``&&``/``;``/``||`` segment and every ``|`` stage within each, because
+        the structural classifier validates each segment independently — so a network
+        program in a LATER segment of a chain (``ls && curl http://evil/x``) is still
+        reachable for a restricted agent, even though a first-word-only check would see the
+        benign leading primary. Used by the restricted-agent gate (SEC-06) to deny exfil.
+        Reuses ``_strip_cd_prefix`` and ``_CONDITIONALLY_SAFE_COMMANDS``; the latter is the
+        single source of truth — if it gains an entry here, this gate tightens for free.
+        """
+        stripped = ShellMixin._strip_cd_prefix(command)
+        cond = ShellMixin._CONDITIONALLY_SAFE_COMMANDS
+        for seg in re.split(r'\s*(?:&&|;|\|\|)\s*', stripped):
+            for stage in seg.split('|'):
+                words = stage.split()
+                if not words:
+                    continue
+                p = words[0].lower()
+                if p in cond:
+                    return True
+                # Wrapper-bypass hardening (SEC-06 review): ``env`` is a blanket-safe
+                # primary, so an env-wrapped network command (``env curl …``, ``env -i curl
+                # …``, ``env FOO=bar python -c …``) reaches the restricted agent with the
+                # network program buried behind ``env``. Conservatively, an ``env`` primary
+                # is network-capable when ANY following token is a network program — this
+                # also catches env's value-taking flags (``env -u VAR curl``), over-rejecting
+                # only the implausible restricted-only case ``env ls curl``.
+                if p == 'env' and any(w.lower() in cond for w in words[1:]):
+                    return True
+        return False
+
+    @staticmethod
     def _curl_is_get_only(words: list) -> bool:
         """True iff the curl invocation is GET-only (reads a URL, no writes).
 
@@ -1348,10 +1382,19 @@ class ShellMixin:
 
         # ── Restricted (system-invoked) agents: hard-reject non-read-only commands.
         #    No user approval prompt — there is no human in the loop for system agents. ──
-        if not strict and self._agent_is_restricted(agent_name):
-            return ('REJECTED: Command not allowed for system agents. '
-                    'Only read-only filesystem/git commands are permitted. '
-                    'Use __help to see allowed commands.')
+        if self._agent_is_restricted(agent_name):
+            if not strict:
+                return ('REJECTED: Command not allowed for system agents. '
+                        'Only read-only filesystem/git commands are permitted. '
+                        'Use __help to see allowed commands.')
+            # SEC-06 (restricted exfil): a system-invoked agent has no human in the loop, so
+            # it must not reach the network at all. Conditionally-safe commands (curl / python /
+            # python3) are network-capable even in their "read-only" form — a curl GET is a
+            # network read, and a `python -c` can import a network module the marker set does
+            # not cover (ftplib / http.client / httpx). Deny them regardless of arg-scoping.
+            if ShellMixin._primary_is_network_capable(command):
+                return ('REJECTED: Network access (curl/python) is not allowed for system '
+                        'agents. Only read-only filesystem/git commands are permitted.')
 
         # BUG_0425: dry-run returns the command-echo preview AFTER the restricted-agent
         # security rejection (security still enforced) but BEFORE the approval gate and before
