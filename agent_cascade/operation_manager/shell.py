@@ -252,6 +252,19 @@ class ShellMixin:
     # untouched — tests and __help text reference it directly.
     _PIPE_STAGE_COMMANDS: set = _SAFE_PIPE_COMMANDS | _SAFE_PRIMARY_COMMANDS
 
+    # Destructive `find` action flags — any of these makes a find command
+    # non-read-only (SEC-01). `-exec`/`-execdir`/`-ok`/`-okdir` execute commands and
+    # `-delete` bulk-deletes. The file-WRITING output predicates below (fprint/fprint0/
+    # fprintf/flprint/fls/flprintf/flnprintf) write to an ARBITRARY FILE passed as their
+    # own argument — NOT a shell `>` redirect, so `_extract_shell_redirect_targets` never
+    # sees them and they can overwrite/create any path (same containment break as
+    # `-delete`). The stdout-only variants (-print/-print0/-printf/-ls) are deliberately
+    # NOT listed here (they write to stdout only).
+    _FIND_DESTRUCTIVE_FLAGS: tuple = (
+        '-delete', '-exec', '-execdir', '-ok', '-okdir',
+        '-fprint', '-fprint0', '-fprintf', '-flprint', '-fls', '-flprintf', '-flnprintf',
+    )
+
     # Conditionally-safe commands (BUG_0180 follow-up): side-effect capable, so
     # NOT in _SAFE_PRIMARY_COMMANDS (no blanket allow) and NOT in
     # _PIPE_STAGE_COMMANDS (a piped curl/python is a producer → guard). Auto-
@@ -469,9 +482,16 @@ class ShellMixin:
         if primary_cmd not in ShellMixin._SAFE_PRIMARY_COMMANDS:
             return False
 
-        # For "find" commands, check that they don't use -exec/-execdir with dangerous actions
-        if primary_cmd == 'find':
-            if '-exec' in stripped_cmd.lower() or '-ok' in stripped_cmd.lower():
+        # Destructive `find` action flags make the command non-read-only (SEC-01).
+        # `-exec`/`-ok` were already blocked; `-delete` (bulk delete) and
+        # `-execdir`/`-okdir` (execute in the found directory) are the destructive
+        # flags that must be denied. Scan EVERY `find` pipeline stage (GNU find
+        # ignores stdin, so `producer | find . -delete` still deletes — a primary-only
+        # guard would miss it). Match whole argv tokens, since flags are always discrete
+        # tokens; this keeps `-name *-delete*` (a search pattern) from a false positive.
+        for stage in pipeline:
+            stage_words = stage.strip().lower().split()
+            if stage_words[:1] == ['find'] and any(w in ShellMixin._FIND_DESTRUCTIVE_FLAGS for w in stage_words[1:]):
                 return False
 
         # Validate pipe stages are safe (any primary-safe command is also a valid stage)
@@ -620,6 +640,19 @@ class ShellMixin:
             if prefix.lower().startswith('cd'):
                 return rest
         return cmd
+
+    @staticmethod
+    def _extract_cd_target(cmd: str) -> str | None:
+        """Return the target of a leading 'cd <target> &&'/'cd <target>;' prefix, or
+        None if the command has no cd prefix. A targetless 'cd &&' returns '' so the
+        caller distinguishes it from "no cd prefix" and rejects it (bare cd moves to
+        $HOME). Mirrors _strip_cd_prefix's parse."""
+        sep_match = re.search(r'\s*(&&|;)\s*', cmd)
+        if sep_match:
+            prefix = cmd[:sep_match.start()].strip()
+            if prefix.lower().startswith('cd'):
+                return prefix[2:].strip()
+        return None
 
     @staticmethod
     def _validate_pipeline_stages(pipeline: list, safe_commands: set) -> bool:
@@ -1207,17 +1240,41 @@ class ShellMixin:
         for the restricted-agent gate / future use; the new-file resolver itself does not
         read it.
         """
+        # Local import (module already loaded app-wide): single place, reused by the
+        # cd-target containment branch and the redirect-target cwd fallback below.
+        from agent_cascade.utils.tool_path_resolver import resolve_tool_path
         if precomputed is not None:
             ok, targets = precomputed
         else:
             ok, targets = ShellMixin._classify_shell_command(command)
         if not ok:
             return (False, [])
+        # SEC-01/SEC-05: a leading "cd <target> && ..." prefix moves the cwd; the
+        # target must resolve within the allowed roots, else an auto-approved
+        # read-only command escapes containment (e.g. `cd /etc && cat shadow`,
+        # `cd / && find . -delete`). Checked before the no-target fast path so a
+        # target-less read command (cat with no redirect) still gets validated.
+        cd_target = ShellMixin._extract_cd_target(command)
+        if cd_target is not None:
+            if not cd_target:
+                # Bare `cd && …` moves to $HOME, which we cannot cheaply prove is
+                # inside the allowed roots → decline auto-approval (human gate).
+                return (False, [])
+            if resolved_cwd is None:
+                try:
+                    resolved_cwd = resolve_tool_path(cwd, mode='rw', agent_pool=self.agent_pool)
+                except Exception:
+                    return (False, [])
+            cd_resolved = cd_target if os.path.isabs(cd_target) else os.path.join(str(resolved_cwd), cd_target)
+            try:
+                resolve_tool_path(cd_resolved, mode='ro', agent_pool=self.agent_pool)
+            except Exception:
+                # cd target resolves outside the allowed roots -> not auto-approvable.
+                return (False, [])
         if not targets:
             return (True, [])
         # Resolve cwd (reuse the caller's if supplied to avoid double work).
         if resolved_cwd is None:
-            from agent_cascade.utils.tool_path_resolver import resolve_tool_path
             try:
                 resolved_cwd = resolve_tool_path(cwd, mode='rw', agent_pool=self.agent_pool)
             except Exception:

@@ -543,12 +543,98 @@ def test_approval_tool_args_include_execution_mode_and_timeout():
     assert tool_args.get('timeout') == 180, f"timeout missing/wrong: {tool_args}"
 
 
+def test_find_delete_and_cd_prefix_guards():
+    """BUG_0420 SEC-01 (destructive find action flags) + SEC-05 (cd-prefix containment).
+
+    Two guards that keep a command auto-approved ONLY when it is genuinely
+    read-only AND cannot escape the allowed roots:
+      (a) a `find` carrying a destructive action flag (-delete/-execdir/-okdir)
+          is structurally unsafe (reachable via _is_safe_readonly_shell_command);
+      (b) a leading `cd <target> &&` prefix whose target resolves outside the
+          allowed roots is NOT auto-approved (reachable via
+          evaluate_shell_command_safety, the final approval decision).
+    Positive controls (safe find / cd inside the workspace) guard against
+    over-denial. The cd part drives the REAL production resolver through an
+    OperationManager built on a temp base_dir, with a minimal pool so
+    resolve_tool_path delegates to om._resolve_path.
+    """
+    import os
+    import tempfile
+    from types import SimpleNamespace
+
+    print('\n=== Testing destructive find flags + cd-prefix containment ===')
+    failed = []
+
+    def check(label, cmd, expected_safe):
+        """expected_safe=True → must be auto-approved; False → must be rejected."""
+        got = OperationManager._is_safe_readonly_shell_command(cmd)
+        status = '✓' if got is expected_safe else '✗ FAILED'
+        print(f"  [{label}] {status} | {cmd!r} -> structural-safe={got} (want {expected_safe})")
+        if got is not expected_safe:
+            failed.append((label, cmd, got, expected_safe))
+
+    # ── (a) Destructive find action flags (structural layer) ──
+    check('find-detect', 'find . -name *.log -delete', False)
+    check('find-detect', 'find . -delete', False)
+    check('find-detect', 'find . -execdir rm {} \\;', False)
+    check('find-detect', 'find . -okdir cat {} \\;', False)
+    # MAJOR#1: destructive find in a NON-primary pipe stage must also be denied.
+    check('find-detect', 'echo x | find . -delete', False)
+    check('find-detect', 'true | find . -exec cat {} ;', False)
+    # MAJOR#1 (follow-up): file-WRITING output predicates take an arbitrary file as
+    # their own argument (not a shell `>` redirect), so they break containment like `-delete`.
+    check('find-detect', 'find . -fprint /etc/x.txt', False)
+    check('find-detect', 'find . -fprintf /etc/x.txt %s', False)
+    check('find-detect', 'echo x | find . -fprint /etc/x.txt', False)
+    # Positive controls: a benign find must stay safe (no over-deny).
+    check('find-safe', 'find . -name x', True)
+    check('find-safe', 'find /workspace -type f', True)
+    # MINOR#2: token-exact match, so a search pattern CONTAINING the token is not a FP.
+    check('find-safe', "find . -name '*-delete*'", True)
+    check('find-safe', 'find . -name x | grep x', True)
+
+    # ── (b) cd-prefix target validation (approval-decision layer) ──
+    base = tempfile.mkdtemp()
+    inside = os.path.join(base, 'sub')
+    os.mkdir(inside)
+    outside = tempfile.mkdtemp()  # separate temp dir, guaranteed OUTSIDE base
+    om = OperationManager(base_dir=base)
+    # Minimal pool: resolve_tool_path delegates to om._resolve_path (real resolver).
+    om.agent_pool = SimpleNamespace(operation_manager=om)
+
+    def is_auto_approved(cmd):
+        return om.evaluate_shell_command_safety(cmd, cwd=base, agent_name='test_agent')[0]
+
+    def check_cd(label, cmd, expected_safe):
+        got = is_auto_approved(cmd)
+        status = '✓' if got is expected_safe else '✗ FAILED'
+        print(f"  [{label}] {status} | {cmd!r} -> auto-approved={got} (want {expected_safe})")
+        if got is not expected_safe:
+            failed.append((label, cmd, got, expected_safe))
+
+    # cd target outside the workspace -> must NOT auto-approve.
+    check_cd('cd-escape', f'cd {outside} && cat secret.txt', False)        # SEC-05 read-escape
+    check_cd('cd-escape', f'cd {outside} && find . -name x', False)        # SEC-05 via a SAFE find
+    check_cd('cd-escape', f'cd {outside} && find . -delete', False)        # SEC-01 + SEC-05
+    # MINOR#3: a targetless `cd &&` moves to $HOME (outside workspace) -> decline.
+    check_cd('cd-escape', 'cd && ls', False)
+    # MINOR#2: relative cd pins — `..` escapes the allowed roots; `.` stays inside.
+    check_cd('cd-escape', 'cd .. && cat /etc/shadow', False)
+    check_cd('cd-safe', 'cd . && ls', True)
+    # Positive controls: cd inside the workspace and a plain command stay approved.
+    check_cd('cd-safe', f'cd {inside} && ls', True)
+    check_cd('cd-safe', 'ls', True)
+
+    assert not failed, f"{len(failed)} guard tests failed: {failed}"
+
+
 if __name__ == '__main__':
-    # Run the three test functions; each asserts internally and raises on failure.
+    # Run the guard test functions; each asserts internally and raises on failure.
     try:
         test_safe_commands()
         test_unsafe_commands()
         test_strip_cd_prefix()
+        test_find_delete_and_cd_prefix_guards()
     except AssertionError as e:
         print(f"\n✗ Test assertion failed: {e}")
         sys.exit(1)
