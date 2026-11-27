@@ -67,6 +67,8 @@ rest_api:
     - {method: GET,    path: /api/file,                 summary: "Serve a file by absolute path (restricted to allowed roots)."}
     - {method: GET,    path: /api/telemetry,            summary: "Session telemetry summary + per-config comparison + recent events."}
     - {method: GET,    path: /api/telemetry/export,     summary: "Download the raw telemetry JSONL log file."}
+    - {method: GET,    path: /api/dna_cohort,           summary: "DNA-cohort A/B analysis vs frozen baseline (BUG_0401 PHASE 1); read-only report."}
+    - {method: POST,   path: /api/dna_cohort,           summary: "Trigger a DNA-cohort analysis run (same as GET; PHASE 1 is read-only)."}
     - {method: GET,    path: /api/endpoints,            summary: "List configured LLM API endpoints and per-agent priorities."}
     - {method: POST,   path: /api/endpoints,            summary: "Add a new LLM API endpoint (name, api_base, model, ...)."}
     - {method: PUT,    path: "/api/endpoints/{id}",     summary: "Update an existing endpoint by id."}

@@ -2407,6 +2407,42 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         return JSONResponse(status_code=404, content={'message': 'No telemetry data available'})
 
     # ── API Router Endpoints ──────────────────────────────────────────────
+    @app.post('/api/dna_cohort')
+    @app.get('/api/dna_cohort')
+    async def api_dna_cohort():
+        """On-demand DNA-cohort analysis (BUG_0401 PHASE 1). Runs the
+        deterministic full-scan core over the live telemetry dir and returns the
+        per-cohort results report. PHASE 1 is strictly READ-ONLY: the report is
+        always rendered with dry_run=True (NO note/cut writes). Note-writes and
+        auto-prepare (prepare_cut) are PHASE 2 concerns and are intentionally not
+        exposed here. The blocking scan runs off the event loop via
+        asyncio.to_thread.
+        """
+        from . import dna_cohort
+        # Resolve the live telemetry dir from the running collector when present,
+        # else fall back to the configured workspace's telemetry subdir.
+        telemetry_dir = workspace_root = ''
+        if agent_pool and getattr(agent_pool, 'telemetry', None):
+            log_dir = str(getattr(agent_pool.telemetry, 'log_dir', '') or '')
+            if log_dir:
+                telemetry_dir = log_dir
+                workspace_root = os.path.dirname(log_dir.rstrip('\\/')) or log_dir
+        if not telemetry_dir:
+            from . import settings
+            workspace_root = settings.DEFAULT_WORKSPACE
+            telemetry_dir = os.path.join(workspace_root, 'telemetry')
+        try:
+            report = await asyncio.to_thread(
+                dna_cohort.run_and_report, telemetry_dir,
+                workspace_root=workspace_root, dry_run=True,
+            )
+            return {'report': report, 'dry_run': True}
+        except NotImplementedError as e:  # PHASE-2 seam — not a server bug
+            return JSONResponse(status_code=501, content={'message': str(e)})
+        except Exception as e:  # noqa: BLE001 — never let analysis break the API
+            logger.error(f'dna_cohort run failed: {e}')
+            return JSONResponse(status_code=500, content={'message': str(e)})
+
 
     @app.get('/api/endpoints')
     async def api_list_endpoints():
