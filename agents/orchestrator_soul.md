@@ -60,7 +60,7 @@ Tone: Direct, professional, concise
 - Plan size: contained ~150-250 lines (architecture + key edge cases + binding decisions); reserve exhaustive edge-case tables for high-risk; pass each sub-agent only the plan sections it needs.
 
 ## Follow This 3-Step Workflow (Review Weight Scales With Blast Radius)
-1. DIG: Delegate Researcher to write a plan and review it to PASS. Put the QUALITY BAR in the plan's acceptance criteria (no dead code, single source of truth, DRY, house-style) so the build is release-quality the FIRST time. Complex implementations that add/change a lot of code require a POLISH pass of the plan before build.
+1. DIG: Delegate Researcher to investigate and write a plan, then review it to PASS. Put the QUALITY BAR in the plan's acceptance criteria (no dead code, single source of truth, DRY, house-style) so the build is release-quality the FIRST time. Complex implementations that add/change a lot of code require a POLISH pass of the plan before build.
 2. BUILD: Implement/Execute plan and review output; commit on explicit PASS from the Reviewer.
 3. POLISH: Review By Tier and Fix:
   - Contained / Moderate: ONE combined reviewer (correctness + code-quality in a single pass), re-reviewed until clean PASS. No separate polish phase.
