@@ -26,7 +26,7 @@ from agent_cascade.budget_words import budget_allocation_notice, budget_limit_no
 from agent_cascade import settings as _ac_settings
 from agent_cascade.settings import (DEFAULT_TOKEN_BUDGET, EFFORT_LEVEL_DEFAULT, SOFT_TURN_LIMIT,
                                     SOFT_TURN_LIMIT_WARNING_INTERVAL,
-                                    effective_soft_limit_cap, effective_turn_cap, normalize_effort_level)
+                                    effective_turn_cap, normalize_effort_level, soft_ceiling_for_run)
 from agent_cascade.tool_utils import clear_truncation_state
 from agent_cascade.utils.streaming import (current_stream_reader_done, reset_stream_reader_done,
                                            stream_reader_in_flight)
@@ -117,9 +117,13 @@ class RunLoopMixin:
             # budget warnings; SOFT_TURN_LIMIT_ABSOLUTE_MAX is the safety ceiling (never
             # below the configured hard cap). Default OFF preserves the hard stop.
             soft_turn_limit = bool(self._get_pool_setting('soft_turn_limit', SOFT_TURN_LIMIT))
-            # The effort notch is a hard per-run ceiling, so bound the soft-limit absolute
-            # ceiling by it too (else soft_turn_limit ON silently defeats the notch).
-            soft_limit_absolute_cap = effective_soft_limit_cap(initial_turns_available, self._effort_level())
+            # The effort notch is a hard per-run ceiling ONLY when soft is OFF. When
+            # soft_turn_limit is ON the user has explicitly asked to respect the soft limit
+            # at ALL effort levels, so the soft ceiling is the absolute max (never notch-
+            # collapsed) — otherwise the notch silently neutralizes the setting (the
+            # BUG_0380 regression that hard-stopped sub-agents at the notch despite soft ON).
+            soft_limit_absolute_cap = soft_ceiling_for_run(
+                initial_turns_available, self._effort_level(), soft_turn_limit)
             # Over-limit warning bookkeeping (only used when soft_turn_limit is ON).
             _soft_limit_last_warn_past = 0
             inst_name = instance.instance_name

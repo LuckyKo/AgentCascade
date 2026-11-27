@@ -113,6 +113,21 @@ def effective_soft_limit_cap(initial_turns_available: int, effort_level: str) ->
     return base if notch is None else min(base, notch)
 
 
+def soft_ceiling_for_run(initial_turns_available: int, effort_level: str,
+                         soft_turn_limit: bool) -> int:
+    """Absolute turn ceiling for the soft-turn-limit path, honoring the user's intent.
+
+    When ``soft_turn_limit`` is ON the user has explicitly asked to respect the soft limit
+    at ALL effort levels, so the ceiling is the absolute max (never notch-collapsed) — a
+    run may over-run past the effort notch. When OFF the ceiling is notch-collapsed via
+    :func:`effective_soft_limit_cap` (the notch is the hard per-run ceiling; the soft path
+    is inert anyway when OFF).
+    """
+    if soft_turn_limit:
+        return max(initial_turns_available, SOFT_TURN_LIMIT_ABSOLUTE_MAX)
+    return effective_soft_limit_cap(initial_turns_available, effort_level)
+
+
 # ── Token budget (cost/token-budget feature, Slice 2) ─────────────────────────
 # Optional, ADDITIVE per-instance cap on GENERATED tokens (completion-only), a
 # second mode of the turn budget. 0 (default) = disabled: turns-mode stays
