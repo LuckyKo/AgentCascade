@@ -1186,9 +1186,9 @@ Lets a text-only endpoint "see" media. When an agent's active endpoint lacks a m
 
 **Single source of truth** (`api_router_pkg/router.py`): one omni endpoint per `agent_priorities['caption']` resolves per modality (image→`vision_enabled`, audio→`audio_enabled`, video→`video_enabled`), with a per-modality caption prompt (image→alt-text, audio→verbatim transcription, video→scene/action) and a failure placeholder (`[Image]`/`[Audio]`/`[Video]`). Absent-flag defaults are deliberately asymmetric: image absent = *capable* (legacy), audio/video absent = *not capable* — so a non-omni endpoint never silently claims audio/video vision.
 
-**Phase 1 (shipped):** per-modality endpoint flags + the `agent_priorities['caption']` list (UI Audio/Video toggles + a "Captioner" role row).
+**Phase 1 (shipped, `476e3417` v0.14.24):** per-modality endpoint flags + the `agent_priorities['caption']` list (UI Audio/Video toggles + a "Captioner" role row).
 
-**Phase 2 (open):** generic media insert into user input, and the `qwenvl_oai` adapter emitting `input_audio`/`video_url` (MIME-tagged inline base64) when the endpoint is capable — text fallback (`[Audio file:…]`/`[Video file:…]`) when it is not. `ContentItem` already carries `audio`/`video` fields; the flatten paths (state builder, compression) are aligned. Pending empirical omni-model testing.
+**Phase 2 (shipped — backend `f5d99320` v0.14.26, UI `e14b4706` v0.14.28):** the `qwenvl_oai` adapter emits `input_audio`/`video_url` (MIME-tagged inline base64) when the endpoint is capable, with a text fallback (`[Audio file:…]`/`[Video file:…]`) when it is not; the generic media-attach UI (image/audio/video in the chat input bar) is live. `ContentItem` carries `audio`/`video` fields and the flatten paths (state builder, compression) are aligned. The only open item is empirical omni-model validation.
 
 ---
 
