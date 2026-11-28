@@ -996,8 +996,14 @@ class RunLoopMixin:
                     self.pool._async_registry.clear_pending(instance.instance_name)
                 except Exception:
                     pass  # Non-critical cleanup
-            # Also drain the message queue to prevent memory leak from stale messages
-            if hasattr(self.pool, 'drain_queue'):
+            # Drain the user-message queue only when the run ended for a TERMINAL reason
+            # (Stop / dismissal / superseded run): those queued messages are stale by intent
+            # and must not start a new run. On a NORMAL completion a queued message is not
+            # stale — it simply arrived after the last turn's drain point — so it must stay
+            # queued for the caller's follow-up run (api_server._retrigger_stranded_message).
+            # Draining it here silently lost the user's message and left the AFK idle nudge
+            # blocked forever on has_messages (BUG_0434).
+            if terminated and hasattr(self.pool, 'drain_queue'):
                 try:
                     self.pool.drain_queue(instance.instance_name)
                 except Exception:

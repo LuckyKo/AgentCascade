@@ -212,6 +212,15 @@ ExecutionEngine.run() — Phase Flow
 
 Each phase is a focused method (~20-60 lines), making them independently testable and easy to reason about. The ExecutionEngine itself does not maintain internal state between calls — all context flows through the `AgentInstance` parameter.
 
+**Run-end queue contract (BUG_0434):** a user message can arrive after the last turn's
+`_post_turn_checks` drain but before `run_agent_thread` clears `session['generating']`.
+`_run_finalize` therefore drains `message_queues` only for a **terminal** run (Stop /
+dismissal / superseded); on a normal completion the message stays queued. The API run-end
+hook (`api_server._retrigger_stranded_message`) then starts a follow-up run for an IDLE
+instance with a queued message, so the message is answered instead of silently dropped, and
+`has_messages` cannot block the AFK idle nudge forever. SLEEPING instances are owned by the
+sleep/wake path; a requested Stop / session switch suppresses the follow-up.
+
 ### 3.4 API Server
 
 **What it represents:** The WebSocket state broadcaster **and** the configuration / control REST surface. It does not execute agents or own conversation state. It receives WebSocket connections, broadcasts pool state updates, relays user messages into the pool's queue system, and exposes an HTTP API for reading and mutating server-side configuration and control state.

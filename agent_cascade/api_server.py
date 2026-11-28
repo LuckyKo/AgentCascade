@@ -332,6 +332,31 @@ def afk_should_nudge(pool, om: OperationManager, *, instance_name: str, instance
     return not last or (now - last) >= AFK_NUDGE_COOLDOWN
 
 
+def should_retrigger_stranded(*, pool, instance, generating: bool, stop_requested: bool,
+                              has_messages: bool) -> bool:
+    """Pure decision: does a message stranded at run end need a follow-up run? (BUG_0434)
+
+    Called from the run-end finally after ``generating`` is cleared. A message still queued
+    there arrived after the engine's last drain point; without a follow-up run nothing would
+    process it, and ``has_messages`` would block the AFK idle nudge forever.
+
+    ``instance`` is the resolved pool instance (None = dismissed; never resurrect it).
+    A non-IDLE instance already has an owner: SLEEPING is handled by the sleep/wake path,
+    and ``engine.run()``'s entry guard only accepts IDLE.
+    """
+    from agent_cascade.agent_instance import AgentState
+
+    if generating or stop_requested or pool is None:
+        return False
+    if getattr(pool, 'stopped', False):
+        return False
+    if instance is None:
+        return False
+    if getattr(instance, 'state', None) != AgentState.IDLE:
+        return False
+    return bool(has_messages)
+
+
 def _build_skill_action_table(metrics: dict) -> list:
     """Build the BUG_0311 per-skill hint action-rate table (BUG_0311).
 
@@ -1673,6 +1698,15 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             # Reset session['generating'] when thread completes
             # This ensures the flag is cleared automatically after execution finishes
             _stop_generation(session)
+            # BUG_0434: a user message that arrived in the run-end tail was enqueued while
+            # generating was still True, so no run was started for it. Give it a follow-up
+            # run BEFORE the AFK hook — otherwise it stays queued forever and the AFK idle
+            # nudge stays blocked on has_messages (gate 6).
+            try:
+                _retrigger_stranded_message(target_instance_name or session['session_name'], loop)
+            except Exception as e:
+                logger.warning('[RETRIGGER] stranded-message hook failed for %s: %s',
+                               target_instance_name or session['session_name'], e)
             # Server-side AFK idle auto-reply (replaces browser checkAfkAutoReply/triggerAfkSend).
             # MUST run AFTER _stop_generation: /api/message refuses to start while generating=True.
             # `loop` is the run's own loop (a param of run_agent_thread, not a create_app local).
@@ -1681,6 +1715,45 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             except Exception as e:
                 logger.warning('[AFK] idle auto-reply hook failed for %s: %s',
                                target_instance_name or session['session_name'], e)
+
+    def _retrigger_stranded_message(instance_name: str, loop) -> None:
+        """Start a follow-up run for a user message stranded at run end (BUG_0434).
+
+        Mirrors the /api/message start path: atomic claim under `session_lock`, then a
+        daemon thread running the normal `run_agent_thread` (so WS streaming, state frames
+        and the run-end AFK hook behave exactly like a user-initiated run). The follow-up
+        run drains the queue in its first `_pre_llm_checks`.
+        """
+        if agent_pool is None:
+            return
+        inst = agent_pool.get_instance(instance_name)
+        if not should_retrigger_stranded(
+                pool=agent_pool,
+                instance=inst,
+                generating=_is_generating(session),
+                stop_requested=session.get('stop_requested', False),
+                has_messages=agent_pool.has_messages(instance_name)):
+            return
+        with session_lock:
+            # Re-check under the same lock the message handlers use so two starters cannot
+            # both claim a run (a no-op run would spend a real LLM turn on no new input).
+            if session.get('generating', False) or not agent_pool.has_messages(instance_name):
+                return
+            session['stop_requested'] = False
+            session['generation_id'] += 1
+            gen_id = session['generation_id']
+            session['generating'] = True
+        try:
+            threading.Thread(
+                target=run_agent_thread,
+                args=(None, None, gen_id, loop, instance_name),
+                name=f"stranded-retrigger-{instance_name}",
+                daemon=True,
+            ).start()
+            logger.info('[RETRIGGER] follow-up run started for stranded message on %s', instance_name)
+        except Exception as e:
+            logger.error('[RETRIGGER] failed to start follow-up run for %s: %s', instance_name, e)
+            _stop_generation(session)  # release the claim so the next message can start
 
     def _afk_maybe_nudge(instance_name: str, loop) -> None:
         """Idle AFK auto-reply (server-side; replaces browser checkAfkAutoReply/triggerAfkSend).
