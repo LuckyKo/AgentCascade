@@ -387,7 +387,7 @@ class TestStderrCapture:
                 f"Stderr 'error message' not found in early output: {early_output}"
         else:
             # Wait for completion (poll: task may vanish from _tasks on cleanup)
-            deadline = time.time() + 10.0
+            deadline = time.time() + 30.0
             all_output = []
             while True:
                 task = tracker._get_task('test_agent', tool_id)
@@ -399,7 +399,7 @@ class TestStderrCapture:
                             task.stdout_lines) + (list(task.stderr_lines) if hasattr(task, 'stderr_lines') else [])
                     if completed:
                         break
-                assert time.time() < deadline, 'Task did not complete within 10s'
+                assert time.time() < deadline, 'Task did not complete within 30s'
                 time.sleep(0.1)
 
             assert rc == 42, f"Expected exit code 42, got {rc}"
@@ -423,7 +423,7 @@ class TestStderrCapture:
         else:
             # Poll (not fixed sleep): the tracking thread cleans the task out of
             # _tasks right after completion, so a single _get_task can race it.
-            deadline = time.time() + 10.0
+            deadline = time.time() + 30.0
             rc = None
             while True:
                 task = tracker._get_task('test_agent', tool_id)
@@ -433,7 +433,7 @@ class TestStderrCapture:
                         rc = task.return_code
                     if completed:
                         break
-                assert time.time() < deadline, 'Task did not complete within 10s'
+                assert time.time() < deadline, 'Task did not complete within 30s'
                 time.sleep(0.1)
 
             assert rc == 42, f"Expected exit code 42, got {rc}"

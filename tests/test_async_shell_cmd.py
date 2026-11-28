@@ -1239,14 +1239,27 @@ class TestRealExecution:
             assert any(expected in line for line in early_output), \
                 f"Output '{expected}' not found in: {early_output}"
         else:
-            time.sleep(1.0)
-            task = tracker._get_task('test_agent', tool_id)
-            with task._lock:
-                assert task.completed is True, 'Task should be completed'
-                assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
-                all_output = task.stdout_lines + (task.stderr_lines if hasattr(task, 'stderr_lines') else [])
-                assert any(expected in line for line in all_output), \
-                    f"Output '{expected}' not found in: {all_output}"
+            # Poll for completion (a fixed sleep is too short under xdist load, and
+            # the tracking thread can reap the task from _tasks on cleanup).
+            deadline = time.time() + 30.0
+            task = None
+            rc = None
+            all_output = []
+            while True:
+                task = tracker._get_task('test_agent', tool_id)
+                if task is not None:
+                    with task._lock:
+                        completed = task.completed
+                        rc = task.return_code
+                        all_output = list(task.stdout_lines) + (list(task.stderr_lines) if hasattr(task, 'stderr_lines') else [])
+                    if completed:
+                        break
+                assert time.time() < deadline, 'Task did not complete within 30s'
+                time.sleep(0.1)
+
+            assert rc == 0, f"Expected exit code 0, got {rc}"
+            assert any(expected in line for line in all_output), \
+                f"Output '{expected}' not found in: {all_output}"
 
     def test_real_python_exit_code_zero(self):
         """A Python one-liner that exits 0 is recorded correctly."""
@@ -1267,16 +1280,24 @@ class TestRealExecution:
         if completed_early:
             assert return_code == 0, f"Expected exit code 0, got {return_code}"
         else:
-            time.sleep(1.0)
-            task = tracker._get_task('test_agent', tool_id)
+            # Poll for completion (a fixed sleep is too short under xdist load).
+            # The tracking thread reaps the task from _tasks on cleanup, so poll and
+            # fall back to the bounded completed-run store if it vanishes (BUG_0061/0422).
+            deadline = time.time() + 30.0
+            task = None
+            while time.time() < deadline:
+                task = tracker._get_task('test_agent', tool_id)
+                if task is not None:
+                    with task._lock:
+                        if task.completed:
+                            break
+                time.sleep(0.1)
+
             if task is not None:
                 with task._lock:
                     assert task.completed is True
                     assert task.return_code == 0, f"Expected exit code 0, got {task.return_code}"
             else:
-                # Task already reaped from _tasks under xdist load: the exit code is preserved
-                # in the bounded completed-run store (BUG_0061). Guard the None/teardown case
-                # (BUG_0422) so the test no longer assumes the task is still registered.
                 record = tracker._get_completed_run('test_agent', tool_id)
                 assert record is not None, 'task reaped but no completed-run record'
                 assert record['return_code'] == 0, f"Expected exit code 0, got {record['return_code']}"
