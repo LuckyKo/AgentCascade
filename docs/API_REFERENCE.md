@@ -24,6 +24,30 @@ The shared secret derived from the handshake is used to encrypt payloads sent to
 - **Lifecycle**: Tokens are valid until the server restarts.
 - **Scope**: Endpoints marked `Y` in the Endpoint Reference require a valid session token (e.g. `/api/message`, `/api/status`, `/api/approve`, `/api/reject`, and the command endpoints).
 
+### API-Key Auth Gate (remote control)
+On top of the session-token model, a global middleware gate (`agent_cascade/auth.py`) protects the
+server when it is exposed beyond loopback. It is **inert by default**: with a loopback bind
+(`AGENT_CASCADE_HOST=127.0.0.1`, the default) and no key configured, every request passes through
+unchanged (byte-identical to pre-gate behavior).
+
+- **Enforced mode** is active when the server binds a non-loopback interface **or** a key is set.
+- **Fail-closed:** a non-loopback bind with **no** key **refuses to boot**.
+
+| Env var | Purpose |
+|---|---|
+| `AGENT_CASCADE_HOST` | Bind interface (default `127.0.0.1`). |
+| `AGENT_CASCADE_ADMIN_API_KEY` | Controller key (read + mutate). |
+| `AGENT_CASCADE_VIEWER_API_KEYS` | Comma-separated read-only keys. |
+
+**Credential on the wire** (priority order): `X-API-Key` header → `Authorization: Bearer <key>` →
+`?api_key=` query param.
+
+**Roles & status codes:** an admin key can read and mutate; a viewer key is read-only (mutations →
+`403`). `401` = missing/invalid credential, `429` = rate-limited. `GET /api/health` is always open
+(liveness probe). The Web UI and Telegram bridge are **unaffected** — they use the loopback
+session-token path and never carry the admin key. See
+[secure-remote-control.md](secure-remote-control.md) for the operator runbook.
+
 ---
 
 ## 1. Error Handling
@@ -52,6 +76,7 @@ All API errors follow a consistent JSON format:
 ### Group A: Session & Security (Auth-Free)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
+| GET | `/api/health` | N | Liveness probe: returns `200` + `{"status":"ok"}`. Always open (no auth). |
 | GET | `/api/keys` | N | Returns the server's X25519 public key. |
 | POST | `/api/handshake` | N | Performs X25519 handshake; returns `session_token`. |
 

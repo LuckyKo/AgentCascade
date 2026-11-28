@@ -33,6 +33,33 @@ Designed for professional environments, AgentCascade prioritizes the quality of 
 - Automated Security Advisor: A dedicated security layer reviews sensitive tool calls. If an agent attempts a potentially dangerous operation, a Security Advisor agent evaluates the risk and approves/rejects the operation, or advises the user on the safety of the operation if set on manual mode.
 - Safe Execution: All code execution is isolated within Docker containers, ensuring that the agents can write and test code without ever risking the integrity of the host machine.
 
+## Secure Remote Control
+
+The REST API and WebSocket server bind to **loopback (`127.0.0.1`) by default** and the auth gate
+is **inert** in that configuration — local control via the Web UI and the Telegram bridge works
+exactly as before, with **no key and no change** to your setup.
+
+To expose the server for **secure remote control**, you opt into *enforced* mode by binding a
+non-loopback interface (a WireGuard/Tailscale mesh address, or a TLS reverse proxy) **and**
+setting a server credential. The gate is **fail-closed**: a non-loopback bind with *no* key
+refuses to start, so you can never accidentally expose an unauthenticated server.
+
+- **Controller (admin) key** — `AGENT_CASCADE_ADMIN_API_KEY`: full read + mutate.
+- **Read-only (viewer) keys** — `AGENT_CASCADE_VIEWER_API_KEYS`: comma-separated, read-only dashboards.
+- **Bind interface** — `AGENT_CASCADE_HOST` (default `127.0.0.1`).
+
+Remote REST callers send the credential via the `X-API-Key` header (or `Authorization: Bearer <key>`).
+The Web UI admin panels and the Telegram bridge are **unchanged** — they use the loopback
+session-token path and never hold the admin key; destructive mutations are reached only via
+scripted REST with the admin key.
+
+The design is **transport-agnostic** (no vendor lock-in): self-hosted **WireGuard** is the
+no-vendor default, and Tailscale, a Caddy TLS reverse-proxy, and an SSH tunnel are all equally
+supported — only the deployment runbook differs, never the AC code.
+
+See [docs/secure-remote-control.md](docs/secure-remote-control.md) for the full operator runbook
+and [docs/API_REFERENCE.md](docs/API_REFERENCE.md) for the auth API details.
+
 ## Multi-Provider API Routing
 
 AgentCascade supports multiple model providers simultaneously, with each agent type able to use its own priority-ordered list of endpoints for automatic failover. When an endpoint fails, requests seamlessly fall back to the next available provider in line.
