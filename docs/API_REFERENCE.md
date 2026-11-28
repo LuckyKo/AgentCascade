@@ -124,6 +124,57 @@ All API errors follow a consistent JSON format:
 | POST | `/api/message` | Y | Inject an encrypted message. Token must be in the JSON body as `session_token`. |
 | GET | `/api/status?token=...` | Y | Returns current state. Token must be provided as a query parameter. |
 
+### Group H: Settings (Auth-Free)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/settings` | N | Returns the pool-settings snapshot with a monotonically increasing `revision` (sensitive keys excluded). |
+| PATCH | `/api/settings` | N | Applies a per-key settings delta (`{base_revision?, changes:{key:value}}`); returns `{revision, applied, rejected}`. |
+
+### Group I: Server Control (Session Token)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/stop?token=...` | Y | Stops all streaming and sets active agents to IDLE (mirrors WS `stop`). Token must be provided as a query parameter. |
+| POST | `/api/restart?token=...` | Y | Restarts the AC server process (destructive). Token must be provided as a query parameter. |
+| POST | `/api/auto_security?token=...` | Y | Toggles Auto-Ask Security mode. Body `{enabled}`. Token must be provided as a query parameter. |
+| POST | `/api/afk?token=...` | Y | Toggles the server-backed AFK flag. Body `{enabled, message?, mode?}`. Token must be provided as a query parameter. |
+
+### Group J: KV State & Session Restore (Session Token)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/state/save?token=...` | Y | Manually saves KV state for an instance. Body `{instance_name?}`. Token must be provided as a query parameter. |
+| POST | `/api/state/load?token=...` | Y | Manually loads KV state for an instance. Body `{instance_name?}`. Token must be provided as a query parameter. |
+| POST | `/api/session/restore?token=...` | Y | Restores a named session from its log. Body `{name, mode?}`. Token must be provided as a query parameter. |
+
+### Group K: DNA Cohort Analysis (Auth-Free)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/dna_cohort` | N | Read-only DNA-cohort analysis over the live telemetry dir (dry-run, never stages or writes). |
+| POST | `/api/dna_cohort` | N | Runs DNA-cohort analysis; body with `stage_cut` + `candidate_content` stages a human-approve-only cut (no auto-commit). |
+| POST | `/api/dna_cohort/approve` | N | Human-only apply of a staged DNA cut to the git INDEX. Body `{candidate_hash, commit?}`; commits only when `commit:true`. |
+
+### Group L: MCP Server Management (Auth-Free)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/mcp-config` | N | Returns the MCP server config (`config/mcp_servers.json`) verbatim; `{}` if absent. |
+| PUT | `/api/mcp-config` | N | Validates and writes the MCP servers map (`{name:{command, args, url, env, enabled?}}`). |
+| GET | `/api/mcp-status` | N | Returns per-server status: `[{name, enabled, connected, tool_count}]`. |
+| POST | `/api/mcp-toggle` | N | Connects/disconnects one MCP server live and persists its `enabled` flag. Body `{server_name, enabled}`. |
+
+### Group M: Image & Media Generation (Auth-Free)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/image_gen` | N | Returns the current image_gen config. |
+| POST | `/api/image_gen` | N | Validates and saves the image_gen config. |
+| GET | `/api/image_gen/workflows` | N | Lists workflow files from the configured `workflow_dir`. |
+| GET | `/api/image_gen/sdcpp_configs` | N | Lists sdcpp model config files from the configured `config_dir`. |
+| GET | `/api/media_gen` | N | Returns the full media_gen settings plus a read-only `project_root`. |
+| POST | `/api/media_gen` | N | Validates and merge-saves media_gen settings (busts the config cache). |
+| GET | `/api/media_gen/manifest` | N | Returns the data-driven backend manifest (`{backends:[...]}`) used to build the UI. |
+| GET | `/api/media_gen/workflows` | N | Lists ComfyUI workflow stems grouped by media type (`{image, video, audio}`). |
+| GET | `/api/media_gen/sdcpp_configs` | N | Lists sdcpp per-model config stems. |
+| GET | `/api/media_gen/tts_configs` | N | Lists TTS voice-config stems. |
+| POST | `/api/media/upload` | N | Saves an uploaded image/audio/video (`multipart` `file`) and returns `{path}`. |
+
 > **Security Note**: While most endpoints are unauthenticated, they are accessible to any client with network access to the server. Implement network-level security (firewalls, TLS) for production deployments.
 
 ---
