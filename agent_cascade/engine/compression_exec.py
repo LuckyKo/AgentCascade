@@ -360,7 +360,13 @@ class CompressionExecMixin:
         if not conv:
             return
 
-        sliced = self.pool.slice_history_for_llm(conv)
+        # BUG_0439: carry the session-spine ToC through this post-compression re-slice too. This
+        # site writes its own slice (and the surrounding logic re-stamps the instance's config
+        # version), so the ToC must be applied here as well — otherwise the next turn sees a
+        # length-parity break with no ToC, and the ToC must be in the single slice chokepoint.
+        _render = getattr(self.pool, '_render_spine_toc', None)
+        spine_toc = _render(inst_name, inst.agent_class) if (_render and inst) else ''
+        sliced = self.pool.slice_history_for_llm(conv, spine_toc) if isinstance(spine_toc, str) and spine_toc else self.pool.slice_history_for_llm(conv)
         llm_messages.clear()
         llm_messages.extend(list(sliced))  # Already a new list from slice_history_for_llm
 

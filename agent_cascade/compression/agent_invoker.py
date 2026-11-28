@@ -885,9 +885,11 @@ def _preserve_items_instruction(preserve_items) -> str:
 def _build_consolidation_prompt(marker_summaries, marker_time_ranges=None, preserve_items=None) -> str:
     """Shared consolidation prompt builder (BUG_0330): used by invoke_consolidation_agent AND
     the warm-session open path so the priming task and any fresh task are byte-identical."""
-    from agent_cascade.prompts.dna import END_MARKER_INSTRUCTION
+    from agent_cascade.prompts.dna import L2_END_MARKER_INSTRUCTION
     summaries_text = _format_summaries_with_spans(marker_summaries, marker_time_ranges)
-    end_instruction = ' ' + END_MARKER_INSTRUCTION  # marker only, no caption for compaction
+    # BUG_0439: L2_END_MARKER_INSTRUCTION already carries the end-marker + segment-caption contract;
+    # the caption rides ahead of the preserve-items suffix below so it never interleaves with it.
+    end_instruction = ' ' + L2_END_MARKER_INSTRUCTION
     return CONSOLIDATION_PROMPT.format(
         summaries_text=summaries_text.strip(),
         end_instruction=end_instruction + _preserve_items_instruction(preserve_items)

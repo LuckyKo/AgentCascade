@@ -129,7 +129,7 @@ def _run_gate(review_side_effect, *, cons_return='CONSOLIDATED', retries=2, enab
                   return_value=(cons_return, '')) as mc, \
             patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                   side_effect=review_side_effect) as mr:
-        result = _validate_and_reconsolidate(**{**_KW, 'agent_pool': pool})
+        result, _ = _validate_and_reconsolidate(**{**_KW, 'agent_pool': pool})
     return result, mc, mr
 
 
@@ -159,7 +159,7 @@ class TestGateDirect:
                       side_effect=cons_side_effect) as mc, \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       side_effect=_always([(False, ['BUG_0309']), (True, [])])) as mr:
-            result = _validate_and_reconsolidate(**_KW)
+            result, _ = _validate_and_reconsolidate(**_KW)
 
         assert result == 'ROUND2'            # round-2 summary accepted after PASS
         assert mc.call_count == 1            # exactly one retry
@@ -215,7 +215,7 @@ class TestGateDirect:
                       side_effect=lambda **k: (next(seq), '')), \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       side_effect=review):
-            result = _validate_and_reconsolidate(**_KW)
+            result, _ = _validate_and_reconsolidate(**_KW)
 
         assert result == 'R2'  # fewest flagged items (1) beats initial (3) and R1 (5)
 
@@ -230,7 +230,7 @@ class TestGateDirect:
                       side_effect=lambda **k: (next(seq), '')), \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       side_effect=review):
-            result = _validate_and_reconsolidate(**_KW)
+            result, _ = _validate_and_reconsolidate(**_KW)
         assert result == 'R2'  # latest attempt wins ties
 
     def test_disabled_never_invokes_reviewer(self):

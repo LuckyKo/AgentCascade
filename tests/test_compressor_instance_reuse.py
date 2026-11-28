@@ -675,7 +675,7 @@ class TestGateWarmSessionLoop:
                       return_value=cons_return) as mc, \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       side_effect=review_fn) as mr:
-            result = _validate_and_reconsolidate(
+            result, _ = _validate_and_reconsolidate(
                 **{**_GATE_KW, 'agent_pool': pool, 'warm_session': warm_session})
         return result, mc, mr
 
@@ -716,7 +716,7 @@ class TestGateWarmSessionLoop:
                       side_effect=cons) as mc, \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       side_effect=lambda **kw: (False, ['a'])) as mr:
-            result = _validate_and_reconsolidate(
+            result, _ = _validate_and_reconsolidate(
                 **{**_GATE_KW, 'agent_pool': pool, 'warm_session': sess})
         assert result == 'FRESH_ROUND'            # best-so-far updated by fresh round (tie→latest)
         assert sess.refines == 1                  # degrades permanently after first failure
@@ -741,7 +741,7 @@ class TestGateWarmSessionLoop:
                       side_effect=cons) as mc, \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       side_effect=lambda **kw: (False, ['z'])):
-            result = _validate_and_reconsolidate(**{**_GATE_KW, 'agent_pool': pool})  # no session
+            result, _ = _validate_and_reconsolidate(**{**_GATE_KW, 'agent_pool': pool})  # no session
         assert result == 'FRESH'
         assert mc.call_count == 1 and seen == [['z']]
         assert compressor_reuse.claim_holder(COMPRESSOR_WARM_NAME) is None

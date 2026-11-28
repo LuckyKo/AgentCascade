@@ -648,6 +648,12 @@ class AgentInstance:
             if index < len(self._cached_llm_messages):
                 self._cached_llm_messages[index] = new_message
             self._last_token_count_conversation_length = -1
+            # BUG_0439: _cached_llm_messages may hold the transient spine ToC (a synthetic message
+            # that is NOT in `conversation`), so the in-place index edit above can misalign it.
+            # Forcing config version=-1 makes can_use_cache False next turn, so the LLM view is
+            # rebuilt by the slice chokepoint with the ToC re-inserted (transient-cache staleness is
+            # discarded before it reaches the LLM). Mirrors rebuild_conversation/reset_conversation.
+            self._last_config_version = -1
 
     def insert_message_at_head(self, message: Message) -> None:
         """Insert message at the beginning (index 0). Invalidates working set cache.
@@ -718,6 +724,10 @@ class AgentInstance:
             del self._cached_messages[new_len:]
             del self._cached_llm_messages[new_len:]
             self._last_token_count_conversation_length = -1
+            # BUG_0439: the transient spine ToC makes _cached_llm_messages one message longer than
+            # conversation, so the `new_len` tail-delete above is off-by-one when the ToC is present.
+            # config version=-1 forces a full re-slice next turn (rebuilds the LLM view with the ToC).
+            self._last_config_version = -1
         return removed
 
     def insert_message_at(self, index: int, message: Message) -> None:

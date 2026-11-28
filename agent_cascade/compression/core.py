@@ -1,13 +1,16 @@
 """Unified compress_context() function — the single entry point for all compression."""
+import json
 import logging
+import os
 import threading
 import time
 
 from agent_cascade.compression.agent_invoker import invoke_compression_agent
 from agent_cascade.compression.helpers import (_refine_tool_call_boundary,
                                                build_consolidation_marker_message, build_marker_message,
-                                               compute_discard_count, extract_last_supervisor_task,
-                                               extract_summary_from_marker, get_marker_time_range,
+                                               compute_discard_count, extract_l2_caption_from_marker,
+                                               extract_last_supervisor_task, extract_summary_from_marker,
+                                               get_marker_time_range,
                                                get_message_role, select_markers_for_consolidation)
 from agent_cascade.compression.result import CompressResult
 from agent_cascade.engine.helpers import _get_active_functions_from_template
@@ -192,31 +195,37 @@ def _validate_and_reconsolidate(
     summaries_to_consolidate: list,
     summary_spans: list,
     initial_summary: str,
+    initial_caption: str = '',
     warm_session=None,
-) -> str:
+) -> tuple[str, str]:
     """Post-consolidation data-integrity gate. ADVISORY-ON-FAILURE.
 
     Reviews the Phase-2 consolidated summary with a separate, tool-less Compressor reviewer
     instance. On a LOSS verdict it re-runs consolidation up to COMPRESSION_REVIEW_MAX_RETRIES
     times, pinning the flagged items verbatim, and keeps the best-so-far (fewest flagged items;
-    ties resolve to the latest attempt). Returns the summary to splice into the pool.
+    ties resolve to the latest attempt). Returns ``(summary, caption)`` to splice into the marker.
+
+    The caption is tracked alongside every summary (parallel ``best_caption``) so the caption
+    co-stored with the ACCEPTED summary is the one that produced it — never the rejected first
+    attempt's caption (BUG_0439 §1b.2 retry-drift fix). The gate never invents a caption: it only
+    returns the one carried by whichever summary wins.
 
     SAFETY (non-negotiable): this function NEVER raises into _consolidate_markers and NEVER blocks
-    compaction. A first-review reviewer error returns initial_summary; a re-consolidation failure
-    skips that attempt and proceeds to the next retry; a reviewer error while auditing a retry
-    candidate returns the current best-so-far. On exhaustion with loss still flagged, it splices the
-    best-so-far anyway and emits a loud logger.error + a telemetry event so the loss is observable —
-    not silent.
+    compaction. A first-review reviewer error returns (initial_summary, initial_caption); a
+    re-consolidation failure skips that attempt and proceeds to the next retry; a reviewer error
+    while auditing a retry candidate returns the current best-so-far. On exhaustion with loss still
+    flagged, it splices the best-so-far anyway and emits a loud logger.error + a telemetry event so
+    the loss is observable — not silent.
 
     Runs OUTSIDE the target's _compression_lock (same as the Phase-2 LLM call). Honors
-    agent_pool.stopped per attempt. Returns initial_summary unchanged when the gate is disabled,
-    making the no-gate path byte-identical.
+    agent_pool.stopped per attempt. Returns (initial_summary, initial_caption) unchanged when the
+    gate is disabled, making the no-gate path byte-identical.
     """
     # Disabled -> reviewer is never invoked; behavior identical to the pre-gate path.
     # Decision 1 (BUG_0419): 0 review rounds == gate fully off — return early so the
     # initial review, re-consolidations, ERROR log and LOSS telemetry all stay off.
     if not COMPRESSION_REVIEWER_ENABLED or COMPRESSION_REVIEW_MAX_RETRIES == 0:
-        return initial_summary
+        return initial_summary, initial_caption
 
     try:
         # Imported inside the body so tests can patch agent_invoker's module symbols.
@@ -241,13 +250,15 @@ def _validate_and_reconsolidate(
         except Exception as e:
             logger.error(f"Compaction reviewer unavailable for '{target_agent_name}' — "
                          f"skipping validation (fail-open): {e}")
-            return initial_summary
+            return initial_summary, initial_caption
 
         if is_pass:
-            return initial_summary
+            return initial_summary, initial_caption
 
         # Best-so-far: fewest flagged items; equal counts resolve toward the latest attempt.
-        best_summary, best_missing = initial_summary, len(missing)
+        # BUG_0439: best_caption rides alongside best_summary so the accepted retry's caption is
+        # never co-stored with the first attempt's caption (retry-drift fix).
+        best_summary, best_caption, best_missing = initial_summary, initial_caption, len(missing)
         attempts = 1
         stopped_break = False
 
@@ -264,10 +275,10 @@ def _validate_and_reconsolidate(
             if warm_session is not None and _res is None:
                 warm_session = None
             if warm_session is not None:
-                new_summary = _res[0]
+                new_summary, new_caption = _res[0], _res[1]
             else:
                 try:
-                    new_summary, _ = invoke_consolidation_agent(
+                    new_summary, new_caption = invoke_consolidation_agent(
                         agent_pool=agent_pool,
                         marker_summaries=summaries_to_consolidate,
                         marker_time_ranges=summary_spans,
@@ -287,20 +298,20 @@ def _validate_and_reconsolidate(
             except Exception as e:
                 logger.error(f"Compaction reviewer unavailable mid-retry for '{target_agent_name}' "
                              f"— accepting current best (fail-open): {e}")
-                return best_summary
+                return best_summary, best_caption
 
             if is_pass:
-                return new_summary
+                return new_summary, new_caption
 
             if len(missing) <= best_missing:  # ties -> latest wins
-                best_summary, best_missing = new_summary, len(missing)
+                best_summary, best_caption, best_missing = new_summary, new_caption, len(missing)
 
         # Pool stopped mid-review: keep the best-so-far quietly — a shutdown is not a data-loss event
         # and must not be counted/reported as one.
         if stopped_break:
             logger.info(f"Agent pool stopped during compaction review for '{target_agent_name}' — "
                         f"keeping best summary (best_missing={best_missing}) without exhausting retries.")
-            return best_summary
+            return best_summary, best_caption
 
         # Retries exhausted with loss still flagged: splice the best-so-far anyway, but shout.
         logger.error(f"Compaction review exhausted {attempts} attempt(s) for '{target_agent_name}': "
@@ -313,13 +324,65 @@ def _validate_and_reconsolidate(
                 tel.record_compaction_validation_loss(target_agent_name, attempts, best_missing)
         except Exception as e:
             logger.debug(f"Compaction validation-loss telemetry failed (non-fatal): {e}")
-        return best_summary
+        return best_summary, best_caption
 
     except Exception as e:
         # Absolute safety net: the gate must never escalate into _consolidate_markers.
         logger.error(f"Compaction validation gate failed for '{target_agent_name}' — "
                      f"accepting initial summary (fail-open): {e}")
-        return initial_summary
+        return initial_summary, initial_caption
+
+
+def _archive_subsumed_l2s(agent_pool, target_agent_name, target_inst,
+                          current_history, current_consolidate_indices):
+    """BUG_0439: archive L2 roll-up markers subsumed by a consolidation to a disposable spine.
+
+    On the 2nd+ consolidation the previous L2 marker is rolled into a new one and leaves the
+    context window entirely. To keep it recoverable without re-inflating context, its summary is
+    written to a disposable file under ``<log_dir>/spine/`` and a one-line pointer is appended to
+    the log's ``metadata['l2_spine']`` manifest, which the pool renders as a transient
+    table-of-contents at message-pool assembly.
+
+    Only markers whose content is an L2 roll-up are archived: L1 markers still have the raw
+    working set behind them, so they are not yet disposable. Call ONLY after
+    ``rebuild_conversation`` succeeded, so the manifest never points at a marker that is still in
+    the pool. Best-effort (caller swallows exceptions): the consolidation has already committed
+    and a spine write must not fail it. The ``spine/`` subdir is REQUIRED — the session-restore
+    log glob is non-recursive, so a top-level spine file would be mistaken for a session log.
+    The manifest ``file`` field stores the absolute spine-file path.
+    """
+    l2_markers = []
+    for idx in current_consolidate_indices:
+        content = extract_text_from_message(current_history[idx], add_upload_info=False)
+        if isinstance(content, str) and content.startswith('--- CONTEXT COMPRESSED (L2,'):
+            l2_markers.append(current_history[idx])
+    if not l2_markers:
+        return
+
+    log_inst = agent_pool.get_logger(target_agent_name, target_inst.agent_class)
+    manifest = log_inst.data['metadata'].setdefault('l2_spine', [])
+    spine_dir = os.path.join(os.path.dirname(os.path.abspath(log_inst.log_path)), 'spine')
+    os.makedirs(spine_dir, exist_ok=True)
+
+    for msg in l2_markers:
+        seq = len(manifest) + 1
+        summary = extract_summary_from_marker(msg) or ''
+        caption = extract_l2_caption_from_marker(msg)
+        if not caption:
+            caption = (summary.splitlines()[0][:60].strip() if summary
+                       else f'L2 segment {seq}')
+        start_ts, end_ts = get_marker_time_range(msg)
+        spine_file = os.path.abspath(os.path.join(
+            spine_dir,
+            f'{target_agent_name}_{target_inst.agent_class}_L2_{seq}_'
+            f'{time.strftime('%Y%m%d_%H%M%S')}.jsonl'))
+        with open(spine_file, 'w', encoding='utf-8') as fh:
+            fh.write(json.dumps({'seq': seq, 'caption': caption,
+                                 'time_range': [start_ts, end_ts], 'content': summary},
+                                ensure_ascii=False) + '\n')
+        manifest.append({'seq': seq, 'caption': caption,
+                         'time_range': [start_ts, end_ts], 'file': spine_file})
+
 
 def _consolidate_markers(
     agent_pool,
@@ -461,13 +524,16 @@ def _consolidate_markers(
 
             # ── Phase 2.5: Post-consolidation data-integrity validation gate ──
             # Advisory-on-failure. Runs OUTSIDE target_inst._compression_lock, like the Phase-2 LLM
-            # call. Must never raise or block; the accepted summary below is what gets spliced.
-            consolidated_summary = _validate_and_reconsolidate(
+            # call. Must never raise or block; the accepted (summary, caption) below is what gets
+            # spliced into the marker — the caption that produced the accepted summary, not the
+            # discarded first attempt's (BUG_0439).
+            consolidated_summary, consolidated_caption = _validate_and_reconsolidate(
                 agent_pool=agent_pool,
                 target_agent_name=target_agent_name,
                 summaries_to_consolidate=summaries_to_consolidate,
                 summary_spans=summary_spans,
                 initial_summary=consolidated_summary,
+                initial_caption=_consolidation_caption,
                 warm_session=warm_session,
             )
         finally:
@@ -531,6 +597,7 @@ def _consolidate_markers(
                 len(summaries_to_consolidate),
                 first_ts=l2_first_ts,
                 last_ts=l2_last_ts,
+                caption=consolidated_caption,
             )
 
             # Stamp the L2 marker's completion ts at creation time. Like L1 markers it is
@@ -570,6 +637,19 @@ def _consolidate_markers(
             # keeps a tail and deliberately does NOT reset it (see
             # AgentInstance._reset_memory_hint_state).
             target_inst._skill_hint_counts = {}
+
+            # BUG_0439: archive any L2 roll-ups subsumed by this consolidation to the disposable
+            # session spine. Runs AFTER rebuild_conversation succeeded (above) and under the same
+            # _compression_lock, so the metadata['l2_spine'] manifest is ordered with the pool
+            # mutation that subsumes the markers it points at; Phase 4 then flushes that manifest
+            # to the JSONL line-1. Best-effort: the consolidation has already committed, so a
+            # spine failure is logged and swallowed rather than rolled back.
+            try:
+                _archive_subsumed_l2s(agent_pool, target_agent_name, target_inst,
+                                      current_history, current_consolidate_indices)
+            except Exception as e:
+                logger.warning(f"Session-spine archive failed for '{target_agent_name}' "
+                               f"(non-fatal; consolidation already committed): {e}")
 
         # ── Phase 4: Sync logger (outside lock, non-fatal) ──
         try:

@@ -116,7 +116,7 @@ class TestLiveGateZeroIsNoOp:
                       return_value=('CONSOLIDATED', '')) as mc, \
                 patch('agent_cascade.compression.agent_invoker.invoke_compaction_reviewer',
                       return_value=(False, ['BUG_0419'])) as mr:
-            result = _validate_and_reconsolidate(agent_pool=pool, **self._KW)
+            result, _ = _validate_and_reconsolidate(agent_pool=pool, **self._KW)
         return result, mc, mr
 
     def test_zero_retries_is_byte_identical_noop(self):

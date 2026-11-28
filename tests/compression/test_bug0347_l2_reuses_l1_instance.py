@@ -525,7 +525,7 @@ class TestCompressContextSingleClaimRelease:
             _core, 'select_markers_for_consolidation', return_value=([2, 5], 8)))
         stack.enter_context(patch.object(_core, 'extract_summary_from_marker', return_value='S1'))
         stack.enter_context(patch.object(_core, 'get_marker_time_range', return_value=(0.0, 1.0)))
-        stack.enter_context(patch.object(_core, '_validate_and_reconsolidate', return_value='CONSOLIDATED'))
+        stack.enter_context(patch.object(_core, '_validate_and_reconsolidate', return_value=('CONSOLIDATED', '')))
         stack.enter_context(patch('agent_cascade.compression.agent_invoker.invoke_consolidation_agent',
                                   return_value=('CONSOLIDATED', '')))
         # 'raise' overrides step 14 with a hard failure; 'run'/'skip' leave the real function.

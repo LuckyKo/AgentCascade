@@ -4,9 +4,10 @@ ConversationMixin — conversation history, compression target sets, and slice_h
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, List
 
-from agent_cascade.llm.schema import SYSTEM, Message
+from agent_cascade.llm.schema import SYSTEM, USER, Message
 from agent_cascade.prompts.dna import COMPRESSION_MARKER
 
 from .conversation_map import _InstanceConversationMapping
@@ -129,7 +130,8 @@ class ConversationMixin:
         active_set = conv[active_start_idx:]
         return active_start_idx, active_set, latest_marker
 
-    def slice_history_for_llm(self, history: List[Message]) -> List[Message]:
+    def slice_history_for_llm(self, history: List[Message],
+                              spine_toc: str | None = None) -> List[Message]:
         """Extract the working set from a conversation.
 
         After load_session_from_log() Fix 1, the working set is already built correctly
@@ -147,7 +149,7 @@ class ConversationMixin:
         ]
 
         if not marker_indices:
-            return list(history)  # No markers — nothing to slice
+            return self._maybe_insert_spine_toc(list(history), spine_toc)  # No markers — nothing to slice
 
         # Determine where content starts (after system message, if present)
         first_role = self._msg_field(history[0], 'role')
@@ -173,7 +175,7 @@ class ConversationMixin:
 
         if markers_stacked:
             # Already culled at load time — return a copy
-            return list(history)
+            return self._maybe_insert_spine_toc(list(history), spine_toc)
 
         # Unculled data still present — apply culling now per design §5.2: [SYS][U0][COMP...][tail]
         tail = list(history[last_marker_idx + 1:])
@@ -197,4 +199,80 @@ class ConversationMixin:
         result.extend(marker_msgs)
         result.extend(tail)
 
-        return result
+        return self._maybe_insert_spine_toc(result, spine_toc)
+
+    _SPINE_TOC_MAX = 20
+
+    def _maybe_insert_spine_toc(self, sliced: List[Message], spine_toc: str | None) -> List[Message]:
+        """Insert a transient spine table-of-contents user message at the KV-cache-safe position.
+
+        Position: immediately after ``[user0]`` (or after the system message when there is no
+        user0), i.e. before the first compression marker. That offset is constant relative to the
+        stable prompt prefix, so the KV cache is not re-invalidate while the rendered ``spine_toc``
+        text is unchanged. A no-op when ``spine_toc`` is empty/None or ``sliced`` is empty, so
+        agents without an archived spine (and every log pre-dating this feature) stay byte-identical.
+        The inserted message is transient — it never reaches the persistent conversation/JSONL.
+        """
+        if not spine_toc or not sliced:
+            return sliced
+        idx = 0
+        if self._msg_field(sliced[0], 'role') == SYSTEM:
+            idx = 1
+        if idx < len(sliced) and self._msg_field(sliced[idx], 'role') == USER:
+            content = self._msg_field(sliced[idx], 'content')
+            if not (isinstance(content, str) and content.startswith(COMPRESSION_MARKER)):
+                idx += 1  # skip past [user0]; ToC goes just before the first marker
+        sliced.insert(idx, Message(role=USER, content=spine_toc))
+        return sliced
+
+    def _render_spine_toc(self, inst_name: str, agent_class: str) -> str:
+        """Render the session-spine ToC for ``inst_name``; '' when the manifest is empty/absent.
+
+        Reads the ``metadata['l2_spine']`` manifest written by the consolidation archive hook, then
+        renders one line per archived L2 in ``seq`` order, capped at the most recent
+        ``_SPINE_TOC_MAX`` entries (older ones collapse into a single count line). The manifest is
+        read without mutating it, so a log with no spine yields '' — no ToC message is inserted and
+        the slice is byte-identical to the pre-feature output.
+
+        Cost: this runs on the per-turn slice hot path (the ``[CACHE_EXTEND]`` branch), so the
+        rendered text is memoized on the logger keyed by manifest length. The manifest is append-only
+        and its entries are immutable, so its length is a monotonic version key — recompute only when
+        a new L2 is archived. ``get_logger`` still acquires the logger-manager lock once per turn, but
+        it does so inside ``instance._compression_lock``: the lock order is **compression → logger**;
+        never acquire the compression lock while holding the logger lock. The memo relies on the
+        logger being a stable per-instance leaf object whose ``__dict__`` persists across turns.
+        """
+        logger = self.get_logger(inst_name, agent_class)
+        manifest = logger.data.get('metadata', {}).get('l2_spine') or []
+        n = len(manifest)
+        cache = logger.__dict__.get('_spine_toc_cache')
+        if cache is not None and cache[0] == n:
+            return cache[1]
+
+        text = ''
+        if manifest:
+            entries = sorted(manifest, key=lambda e: e.get('seq', 0))
+            cap = self._SPINE_TOC_MAX
+            hidden = 0
+            if len(entries) > cap:
+                hidden = len(entries) - cap
+                entries = entries[-cap:]
+            lines = ['SESSION SPINE (archived L2 segments — open the file to drill in):']
+            for e in entries:
+                start, end = (e.get('time_range') or [None, None])[:2]
+                span = self._format_spine_span(start, end)
+                lines.append(f'[L2#{e.get('seq')}] "{e.get('caption', '')}" ({span}) -> {e.get('file', '')}')
+            if hidden:
+                lines.append(f'… and {hidden} more (see the JSONL metadata manifest)')
+            text = '\n'.join(lines)
+        logger.__dict__['_spine_toc_cache'] = (n, text)
+        return text
+
+    @staticmethod
+    def _format_spine_span(start, end) -> str:
+        """Render a time range as 'HH:MM -> HH:MM' (guarding None), matching the L1 marker clock."""
+        if start is None and end is None:
+            return 'time n/a'
+        s = datetime.fromtimestamp(start).strftime('%H:%M') if start is not None else '?'
+        e = datetime.fromtimestamp(end).strftime('%H:%M') if end is not None else '?'
+        return f'{s} -> {e}'

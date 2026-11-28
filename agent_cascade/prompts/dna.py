@@ -142,6 +142,21 @@ CAPTION_INSTRUCTION = (
     f" On the same line as the marker (no newline), append `CAPTION: <one short phrase, ≤120 chars>` "
     f"describing the session's topic.")
 
+# BUG_0439 L2 caption instruction: same tail-caption contract as L1, but scoped to THIS
+# consolidated segment's topic. Deliberately distinct from CAPTION_INSTRUCTION ("the session's
+# topic"): every L2 belongs to the same session, so reusing the L1 wording makes the LLM emit the
+# same caption every hop and gut the session-spine ToC. Appended to the L2 end_instruction
+# (agent_invoker._build_consolidation_prompt) so the LLM emits `CAPTION: <text>` after the end
+# marker; the existing tail-caption parser (_CAPTION_TAIL_RE) extracts it. L1 is untouched.
+L2_CAPTION_INSTRUCTION = (
+    f" On the same line as the marker (no newline), append `CAPTION: <one short phrase, ≤120 chars>` "
+    f"describing this consolidated segment's topic.")
+
+# BUG_0439: single source for the L2 consolidation end-instruction, so the fresh-respawn
+# (agent_invoker._build_consolidation_prompt) and warm-refine (compressor_reuse.refine) sites
+# render byte-identically and cannot drift.
+L2_END_MARKER_INSTRUCTION = END_MARKER_INSTRUCTION + L2_CAPTION_INSTRUCTION
+
 COMPRESSION_PROMPT = (
     'Summarize the following conversation history.\n'
     'Focus strictly on key decisions, important facts, established context, and the current state of tasks.\n'

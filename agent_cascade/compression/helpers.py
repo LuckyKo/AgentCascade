@@ -27,6 +27,15 @@ _MARKER_TS_RE = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) → (\d{4}-\d{2}-\d
 # decision to keep system-flavoured prose out of the supervisor's own message.
 LAST_TASK_SECTION = '\n\n<last_supervisor_task>\n{task}\n</last_supervisor_task>'
 
+# BUG_0439: trailing block appended to an L2 consolidation marker carrying the LLM-generated
+# caption for THIS consolidated segment (its topic). Rendered AFTER </context_summary> — never
+# inside it — for the same reason as LAST_TASK_SECTION: every summary consumer takes the first
+# <context_summary>..</context_summary> pair. Unlike the L1 last-task block, this one is read back
+# by the _consolidate_markers archive hook to seed the session-spine ToC (one stable line, round-
+# trips through JSONL). Skipped when the caption is empty, so a legacy L2 carries no such tag and
+# the archive hook falls back to the summary's first line.
+L2_CAPTION_SECTION = '\n\n<l2_caption>{caption}</l2_caption>'
+
 
 def is_compression_marker(msg: Any) -> bool:
     """Check if a message is a valid compression marker.
@@ -208,6 +217,30 @@ def extract_summary_from_marker(msg: Any) -> str | None:
     except Exception:
         pass
     return None
+
+
+_L2_CAPTION_RE = re.compile(r'<l2_caption>(.*?)</l2_caption>', re.DOTALL)
+
+
+def extract_l2_caption_from_marker(msg: Any) -> str | None:
+    """Extract the LLM-generated L2 caption from a consolidation marker (BUG_0439 §1b.3).
+
+    Returns the text inside the first ``<l2_caption>...</l2_caption>`` block, stripped, or None
+    when the marker carries no such block (a legacy L2 created before the feature, or a non-
+    compliant LLM run). The archive hook falls back to the summary's first line in that case, so
+    an absent caption is expected, not an error.
+    """
+    try:
+        content = extract_text_from_message(msg, add_upload_info=False)
+        if not isinstance(content, str):
+            return None
+        match = _L2_CAPTION_RE.search(content)
+        if not match:
+            return None
+        caption = match.group(1).strip()
+        return caption if caption else None
+    except Exception:
+        return None
 
 
 def get_message_role(msg) -> str:
@@ -607,6 +640,7 @@ def build_consolidation_marker_message(
     num_summaries_consolidated: int,
     first_ts: float | None = None,
     last_ts: float | None = None,
+    caption: str | None = None,
 ) -> Message:
     """Build a L2 consolidation marker message.
 
@@ -625,6 +659,10 @@ def build_consolidation_marker_message(
         num_summaries_consolidated: Number of lower-level summaries merged into this one.
         first_ts: Start timestamp (unix seconds) of the first consolidated marker's window.
         last_ts: End timestamp (unix seconds) of the last consolidated marker's window.
+        caption: Optional LLM-generated caption describing this segment's topic (BUG_0439). When
+            truthy, a single <l2_caption>{caption}</l2_caption> line is appended AFTER
+            </context_summary>; the archive hook reads it to seed the session-spine ToC. Empty/None
+            → no line (a legacy or non-compliant L2 falls back to the summary's first line).
 
     Returns:
         A Message object (USER role) with the formatted consolidation marker.
@@ -638,6 +676,8 @@ def build_consolidation_marker_message(
         header=header,
         summary=summary_text,
     )
+    if caption and caption.strip():
+        content += L2_CAPTION_SECTION.format(caption=caption.strip())
     return _stamp_summary_span(Message(role=USER, content=str(content)), first_ts, last_ts)
 
 

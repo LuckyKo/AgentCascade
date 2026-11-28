@@ -117,7 +117,9 @@ class TurnSetupMixin:
                         new_messages = list(instance.conversation[cached_len:])
                         instance._cached_messages.extend(new_messages)
                         # Re-slice to ensure marker correctness after extension
-                        sliced = self.pool.slice_history_for_llm(instance._cached_messages)
+                        _render = getattr(self.pool, '_render_spine_toc', None)
+                        spine_toc = _render(instance.instance_name, instance.agent_class) if _render else None
+                        sliced = self.pool.slice_history_for_llm(instance._cached_messages, spine_toc) if isinstance(spine_toc, str) and spine_toc else self.pool.slice_history_for_llm(instance._cached_messages)
                         instance._cached_llm_messages = list(sliced) if sliced else list(instance._cached_messages)
                     else:
                         # cached_len > current_len indicates a regression in
@@ -362,7 +364,9 @@ class TurnSetupMixin:
 
         # messages = full working set; llm_messages = what actually goes to LLM
         # Apply slice to extract system + post-marker tail if markers exist
-        sliced = self.pool.slice_history_for_llm(conv)
+        _render = getattr(self.pool, '_render_spine_toc', None)
+        spine_toc = _render(instance.instance_name, instance.agent_class) if _render else None
+        sliced = self.pool.slice_history_for_llm(conv, spine_toc) if isinstance(spine_toc, str) and spine_toc else self.pool.slice_history_for_llm(conv)
         llm_messages = list(sliced) if sliced else list(conv)
 
         self._sync_turn_cache(instance, conv, llm_messages)

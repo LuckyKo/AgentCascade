@@ -208,14 +208,17 @@ class WarmCompressorSession:
             from agent_cascade.compression.agent_invoker import (
                 _execute_compressor_and_extract_summary, _preserve_items_instruction,
                 _reset_terminated_compressor_for_retry)
-            from agent_cascade.prompts.dna import CONSOLIDATION_CORRECTION_PROMPT, END_MARKER_INSTRUCTION
+            from agent_cascade.prompts.dna import (
+                CONSOLIDATION_CORRECTION_PROMPT, L2_END_MARKER_INSTRUCTION)
 
-            # Correction task reuses the exact single-source preserve wording so the fresh-respawn
-            # and warm-correction prompts carry the same instruction, plus the end-marker contract
-            # so the output parser applies unchanged (§3f F-3).
+            # Correction task reuses the exact single-source preserve wording plus the end-marker
+            # contract so the output parser applies unchanged (§3f F-3). BUG_0439: the caption rides
+            # here too, so a warm-refine winner yields a real segment caption via _res[1] instead of
+            # a structurally-empty one (otherwise the warm path silently drops the caption and the
+            # archive hook falls back to the summary's first line).
             correction_task = CONSOLIDATION_CORRECTION_PROMPT.format(
                 preserve_items_instruction=_preserve_items_instruction(preserve_items),
-                end_instruction=END_MARKER_INSTRUCTION)
+                end_instruction=L2_END_MARKER_INSTRUCTION)
             # A run that ended on max_turns leaves TERMINATED; engine.run() would trip the L1 race
             # guard. No-op unless TERMINATED (same helper as the compression retry path).
             _reset_terminated_compressor_for_retry(self.agent_pool, self.instance, self.actual_name)
