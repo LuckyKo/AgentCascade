@@ -1175,6 +1175,21 @@ Out-of-band notices that must reach the model (but are not part of the conversat
 
 **Context-limit warnings:** `_inject_compression_warning` (`engine/compression_exec.py`) queues `[SYSTEM WARNING: Context window at N% capacity (A/B tokens)…]` when usage crosses `compression_warning_threshold`. It uses this queue deliberately: mutating the last LLM message in place was invisible to the log/UI and could be lost on a working-set rebuild, whereas the tool-result drain is persisted and user-visible.
 
+### 5.9 Media Auto-Captioning (omni-multimodal)
+
+Lets a text-only endpoint "see" media. When an agent's active endpoint lacks a modality's capability (image/audio/video) and the turn carries uncaptioned media of that modality, the API Router auto-generates a caption via a dedicated **omni (multimodal) caption endpoint** and feeds the caption to the text model, so the media's content is not lost.
+
+**Unified gate — `image_caption_mode`** (no separate persisted key):
+- `auto` (default) — caption only when the active endpoint is *not* already capable for that modality.
+- `always` — caption every new (uncaptioned) media item.
+- `off` — never caption.
+
+**Single source of truth** (`api_router_pkg/router.py`): one omni endpoint per `agent_priorities['caption']` resolves per modality (image→`vision_enabled`, audio→`audio_enabled`, video→`video_enabled`), with a per-modality caption prompt (image→alt-text, audio→verbatim transcription, video→scene/action) and a failure placeholder (`[Image]`/`[Audio]`/`[Video]`). Absent-flag defaults are deliberately asymmetric: image absent = *capable* (legacy), audio/video absent = *not capable* — so a non-omni endpoint never silently claims audio/video vision.
+
+**Phase 1 (shipped):** per-modality endpoint flags + the `agent_priorities['caption']` list (UI Audio/Video toggles + a "Captioner" role row).
+
+**Phase 2 (open):** generic media insert into user input, and the `qwenvl_oai` adapter emitting `input_audio`/`video_url` (MIME-tagged inline base64) when the endpoint is capable — text fallback (`[Audio file:…]`/`[Video file:…]`) when it is not. `ContentItem` already carries `audio`/`video` fields; the flatten paths (state builder, compression) are aligned. Pending empirical omni-model testing.
+
 ---
 
 ## 6. Parallel Instance Separation
