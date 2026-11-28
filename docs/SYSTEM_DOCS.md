@@ -1825,13 +1825,13 @@ live idle cost.
 | Async tracker | `async_shell_pkg/cli_agent_tracker.py` | Background execution path (`execution_mode='async'`) |
 | OAuth login | `engine/cli_agent_oauth.py` | Manual `docker run -it` login command + auth re-check for key-less (OAuth) harnesses |
 
-Adapters: `claude_code` (`claude -p`), `opencode` (`opencode run`), `antigravity` (`agy -p`). The registry key is the harness name; the binary token may differ (antigravity → `agy`).
+Adapters: `claude_code` (`claude -p`), `opencode` (`opencode run`), `antigravity` (`agy -p`), `copilot` (`copilot -p`). The registry key is the harness name; the binary token may differ (antigravity → `agy`). `copilot` authenticates with GitHub's `GITHUB_TOKEN` (a GitHub account token, **not** an AC LLM key) and exposes no model flag (the model follows the GitHub plan).
 
 ### 12.2 Auth models
 
 Two shapes, declared by the adapter:
 
-- **`auth_type = 'api_key'`** (`claude_code`, `opencode`) — the runner injects the single native env var via `docker -e <VAR>=<key>`; the key is read from `secrets.json` (`cli_<harness>_key`) and never enters `pool_settings` or the state broadcast.
+- **`auth_type = 'api_key'`** (`claude_code`, `opencode`, `copilot`) — the runner injects the single native env var via `docker -e <VAR>=<key>`; the key is read from `secrets.json` (`cli_<harness>_key`) and never enters `pool_settings` or the state broadcast. `copilot`'s var is `GITHUB_TOKEN` (a GitHub account token, not an AC key), so no AC credential is inherited.
 - **`auth_type = 'oauth'`** (`antigravity`) — no env-var key exists. The CLI keeps an account store at `auth_volume_target` inside the container, so the runner mounts a **named Docker volume** there. A host bind-mount cannot work on Windows: the token lives in Credential Manager (`LegacyGeneric:target=gemini:antigravity`, DPAPI-bound) and a Linux container cannot read it.
 
 OAuth volume settings:
