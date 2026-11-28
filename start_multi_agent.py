@@ -77,14 +77,25 @@ if __name__ == '__main__':
     from agent_cascade.log import init_logging, logger
     init_logging()
 
+    # BUG_0435: resolve the bind host (loopback-first default, replaces old hard-coded
+    # 0.0.0.0) and apply the fail-closed boot rule BEFORE binding: a non-loopback bind
+    # with no server key configured refuses to start. Loopback + no key = inert (today).
+    from agent_cascade import auth as _auth
+    _bind_host = _auth.effective_host()
+    try:
+        _auth.check_boot_preconditions(_bind_host)
+    except RuntimeError as e:
+        logger.error('[FATAL] %s', e)
+        raise SystemExit(1)
+
     # Startup splash (ASCII banner with version + URL). Additive: runs after logging is
     # up so it also lands in console.log. Non-TTY / AGENT_CASCADE_NO_BANNER → one-liner.
-    # host="0.0.0.0" matches this entry point's uvicorn bind (LAN access).
+    # host reflects the effective bind (_bind_host); loopback by default (BUG_0435).
     from agent_cascade.splash import print_startup_banner
     print_startup_banner(
         mode='Multi-Agent',
         port=int(os.getenv('AGENT_CASCADE_PORT', 8765)),
-        host='0.0.0.0',
+        host=_bind_host,
     )
 
     import sys
@@ -167,19 +178,21 @@ if __name__ == '__main__':
         raise SystemExit(1)
 
     port = int(os.getenv('AGENT_CASCADE_PORT', 8765))
+    disp_host = '127.0.0.1' if _bind_host in ('0.0.0.0', '0.0.0.0:') else _bind_host
     logger.info('\n[OK] API Server ready!')
-    logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
-    logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
-    logger.info('    -> REST API at http://127.0.0.1:%d/api/', port)
+    logger.info('    -> Open http://%s:%d in your browser', disp_host, port)
+    logger.info('    -> WebSocket at ws://%s:%d/ws/chat', disp_host, port)
+    logger.info('    -> REST API at http://%s:%d/api/', disp_host, port)
     logger.info('\n[TIP] Type in this terminal to inject messages into the active agent.')
     logger.info('=' * 50)
 
     import signal
 
-    # Use Config + Server pattern for graceful shutdown support (host 0.0.0.0 allows LAN access)
-    config = uvicorn.Config(app, host='0.0.0.0', port=port, log_level='warning')
+    # Use Config + Server pattern for graceful shutdown support (bind host from AGENT_CASCADE_HOST,
+    # loopback by default — BUG_0435; non-loopback requires a server key, checked at boot).
+    config = uvicorn.Config(app, host=_bind_host, port=port, log_level='warning')
     server = uvicorn.Server(config)
-    agent_pool.server_info = ('0.0.0.0', port)
+    agent_pool.server_info = (_bind_host, port)
 
     def handle_shutdown(signum, frame):
         logger.info('\n[INFO] Initiating graceful shutdown...')

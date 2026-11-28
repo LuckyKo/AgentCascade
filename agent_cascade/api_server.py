@@ -868,6 +868,118 @@ def _cors_kwargs() -> dict:
     }
 
 
+async def _audit_event(method, route, status, key_id, role, ip, dur_ms=0):
+    """Best-effort audit write shared by the REST gate (install_auth_gate) and the
+    WS gate (ws_chat). Module-level so both scopes resolve it. Never raises."""
+    try:
+        from agent_cascade.audit import get_audit_logger
+        al = get_audit_logger()
+        if not al.enabled:
+            return
+        await asyncio.to_thread(
+            al.record, method=method, route=route, result=status,
+            key_id=key_id, role=role, ip=ip, dur_ms=dur_ms,
+        )
+    except Exception:
+        pass
+
+
+def install_auth_gate(app, *, sessions=None):
+    """Install the BUG_0435 auth gate middleware on ``app`` (single source of truth).
+
+    Both ``create_app`` (production) and the auth-gate tests build their app through
+    this function, so the enforced-mode behavior (401 no-key / 403 viewer-on-mutation /
+    429 rate-limit) is exercised against the exact middleware that ships. All policy
+    decisions delegate to ``agent_cascade.auth``; nothing here is duplicated there.
+
+    Install AFTER ``CORSMiddleware`` so preflight ``OPTIONS`` is answered by CORS (the
+    gate classifies OPTIONS as 'open' and passes it through). INERT when
+    ``auth_state()=="disabled"`` (loopback bind + no key) -> byte-identical to no gate.
+
+    ``sessions`` is the api_sessions dict for the legacy session_token handshake path;
+    pass the production dict in ``create_app``. ``None`` means no session-token
+    acceptance (fine for a read-only/mutation-only test app).
+    """
+    from fastapi.responses import JSONResponse
+    from agent_cascade import auth as _auth
+    from agent_cascade import settings as _auth_settings
+    import math as _math
+    import time as _time
+
+    api_sessions = sessions if sessions is not None else {}
+
+    @app.middleware('http')
+    async def _ac_auth_gate(request, call_next):
+        if _auth.auth_state() == 'disabled':
+            return await call_next(request)
+
+        method = request.method
+        path = request.url.path
+        cls = _auth.classify(method, path)
+        headers = dict(request.headers)
+        query = dict(request.query_params)
+        # One authenticate() reused for BOTH the rate-limit bucket principal and the
+        # authorization verdict (was called twice on every non-loopback mutation).
+        result = _auth.authenticate(headers, query, api_sessions)
+        # Reverse-proxy aware client IP. Default (unset AGENT_CASCADE_TRUST_PROXY)
+        # is the socket peer — byte-identical to before. Under the opt-in, the
+        # leftmost X-Forwarded-For is used so a localhost reverse proxy cannot make
+        # every remote client look like 127.0.0.1 (which would defeat both the
+        # loopback rate-limit exemption and the audit IP).
+        client_ip = _auth.best_client_ip(headers, request.client.host if request.client else None)
+        loopback_client = _auth.is_loopback_ip(client_ip)
+
+        # Rate limiting (loopback-exempt) runs BEFORE the 'open' short-circuit:
+        # /api/handshake is an OPEN bootstrap route (it issues the session_token) and
+        # MUST still be throttled, so it cannot hide behind the open early-return.
+        if not loopback_client:
+            group = _auth.route_rate_group(method, path)
+            if group is not None:
+                # Bucket per credential(key-id hash)+IP so one abusive key neither
+                # shares nor burns another's quota. The principal here is only for
+                # bucketing — validity/role is decided later by authorize().
+                principal = result.key_id  # reuse the single authenticate() above
+                per_min = {
+                    'handshake': _auth_settings.RATE_LIMIT_HANDSHAKE_PER_MIN,
+                    'approve': _auth_settings.RATE_LIMIT_APPROVE_PER_MIN,
+                    'slow': _auth_settings.RATE_LIMIT_SLOWROUTE_PER_MIN,
+                    'mutating': _auth_settings.RATE_LIMIT_MUTATING_PER_MIN,
+                }[group]
+                retry = _auth.check_rate_limit(f'{group}:{principal}:{client_ip}', per_min)
+            else:
+                retry = 0.0
+            if retry > 0.0:
+                await _audit_event(method, path, 429, _auth.KEY_NONE, 'none', client_ip)
+                return JSONResponse(
+                    status_code=429,
+                    content={'message': 'Too Many Requests'},
+                    headers={'Retry-After': str(max(1, int(_math.ceil(retry))))},
+                )
+
+        if cls == 'open':
+            return await call_next(request)
+
+        verdict = _auth.authorize(cls, result)  # `result` computed once above
+        if verdict == 'unauth':
+            await _audit_event(method, path, 401, result.key_id, 'none', client_ip)
+            return JSONResponse(status_code=401, content={'message': 'Authentication required'})
+        if verdict == 'forbidden':
+            await _audit_event(method, path, 403, result.key_id, 'viewer', client_ip)
+            return JSONResponse(status_code=403, content={'message': 'Insufficient privileges'})
+
+        request.state.ac_role = result.role
+        request.state.ac_key_id = result.key_id
+
+        _t0 = _time.monotonic()
+        response = await call_next(request)
+        dur_ms = int((_time.monotonic() - _t0) * 1000)
+        # Audit every mutation + any server error (failed auth already audited above).
+        if cls == 'mutating' or response.status_code >= 500:
+            await _audit_event(method, path, response.status_code, result.key_id, result.role, client_ip, dur_ms)
+        return response
+
+
+
 def create_app(agents, agent_pool, config=None, auto_security=True):
     """
     Create the FastAPI application.
@@ -1004,6 +1116,11 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
         allow_headers=['*'],
         **_cors_kwargs(),
     )
+
+    # ── BUG_0435: the global auth gate (single source of truth = install_auth_gate +
+    # agent_cascade.auth) is registered right after CORS via install_auth_gate() at the
+    # api_sessions definition below (it needs the session dict). INERT when
+    # auth_state()=="disabled" (loopback bind + no key) -> byte-identical to today.
 
     # ── Unified architecture imports (Phase 5) ───────────────────────────
     from agent_cascade.api_integration import (_build_agents_list, _get_approvals, _resolve_max_tokens,
@@ -1172,6 +1289,13 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
     # Session storage for external API clients
     # key: session_token (string), value: shared_secret (bytes)
     api_sessions: Dict[str, bytes] = {}
+
+    # ── BUG_0435: register the auth gate here (single source of truth = install_auth_gate),
+    # after api_sessions exists so the gate can accept the legacy session_token path. Still
+    # registered after CORSMiddleware (see above) so the gate is the outermost middleware.
+    # _auth is also imported for the /ws/chat handler closure below.
+    from agent_cascade import auth as _auth
+    install_auth_gate(app, sessions=api_sessions)
 
     ws_connections: Set[WebSocket] = set()
     # Bounded queue to prevent stale event buildup during sustained streaming.
@@ -1852,6 +1976,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
             'public_key': base64.b64encode(server_public_bytes).decode('utf-8'),
             'algorithm': 'X25519'
         }
+
+    @app.get('/api/health')
+    async def api_health():
+        """Liveness probe (BUG_0435, OPEN_SET): no credential, no session. For mesh/proxy
+        health checks and the operator to confirm the server is up without authenticating."""
+        return {'status': 'ok'}
 
     @app.post('/api/handshake')
     async def api_handshake(data: dict):
@@ -2546,7 +2676,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.get('/api/endpoints')
     async def api_list_endpoints():
-        """List all configured API endpoints and agent priorities."""
+        """List all configured API endpoints and agent priorities (raw config).
+
+        The ADMIN_ONLY_READ gate blocks a VIEWER with 403; a controller reads raw
+        provider keys because it can already write them, so no response masking
+        (the WebUI uses the raw value; masking would corrupt a save round-trip).
+        """
         if agent_pool and hasattr(agent_pool, 'api_router'):
             return agent_pool.api_router.to_dict()
         return {'endpoints': [], 'agent_priorities': {}}
@@ -2650,9 +2785,12 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.get('/api/mcp-config')
     async def get_mcp_config():
-        """Return the raw MCP server config (config/mcp_servers.json). {} if the file is absent."""
-        cfg = _read_mcp_config()
-        return cfg if cfg is not None else {}
+        """Return the MCP server config (config/mcp_servers.json) verbatim. {} if the
+        file is absent. The gate denies a VIEWER (ADMIN_ONLY_READ); a controller may
+        read raw secrets because it can already write them, and the WebUI editor PUTs
+        this response back verbatim — masking here would corrupt the on-disk secrets.
+        """
+        return _read_mcp_config() or {}
 
     @app.put('/api/mcp-config')
     async def put_mcp_config(data: dict):
@@ -2949,6 +3087,26 @@ def create_app(agents, agent_pool, config=None, auto_security=True):
 
     @app.websocket('/ws/chat')
     async def ws_chat(websocket: WebSocket):
+        # BUG_0435: on loopback binds leave the WebUI control channel open (inert).
+        # On non-loopback/mesh binds require a credential BEFORE accept() — same
+        # predicate as REST (session_token query `token` or api_key query/header) —
+        # else close with 1008 (policy violation).
+        _ws_reason = _auth.ws_reject_reason(
+            dict(websocket.headers), dict(websocket.query_params), api_sessions,
+        )
+        if _ws_reason is not None:
+            # Best-effort audit of the rejected WS handshake (REST rejections are
+            # audited; mirror it here). Guarded on auth_state so the disabled/inert
+            # path never touches the audit logger or FS — preserving the invariant.
+            if _auth.auth_state() != 'disabled':
+                _ws_ip = _auth.best_client_ip(
+                    dict(websocket.headers),
+                    websocket.client[0] if websocket.client else None,
+                )
+                await _audit_event('WS', websocket.url.path, 401,
+                                   _auth.KEY_NONE, 'none', _ws_ip)
+            await websocket.close(code=1008, reason=_ws_reason)
+            return
         await websocket.accept()
 
         # Assign a short id so command logs can attribute actions to a specific client.
@@ -3219,7 +3377,8 @@ if __name__ == '__main__':
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
     parser = argparse.ArgumentParser(description='AgentCascade API Server')
-    parser.add_argument('--host', type=str, default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--host', type=str, default=os.getenv('AGENT_CASCADE_HOST', '127.0.0.1'),
+                        help='Host to bind to (BUG_0435: loopback default)')
     parser.add_argument('--port', type=int, default=12345, help='Port to bind to')
     parser.add_argument('--workspace', type=str, default=str(DEFAULT_WORKSPACE), help='Workspace directory')
     parser.add_argument('--idle-timeout', type=float, default=None,
@@ -3413,10 +3572,34 @@ if __name__ == '__main__':
         raise SystemExit(1)
 
     port = args.port
+
+    # BUG_0435: bind on the SAME host the gate enforces on (single source of truth).
+    # The gate's effective_host() reads AGENT_CASCADE_HOST live, so seeding that env
+    # var from the CLI --host makes the bind interface and enforcement agree. Without
+    # this, `--host 0.0.0.0` with no env would bind non-loopback (REST enforced) while
+    # the WS gate read loopback and accepted ANY remote client on shell-capable
+    # /ws/chat. Default --host already tracks the env, so this only matters for an
+    # explicit --host override.
+    from agent_cascade import auth as _auth
+    os.environ['AGENT_CASCADE_HOST'] = args.host
+    _bind_host = _auth.effective_host()
+
+    # Fail-closed boot rule — a non-loopback bind with no server key must refuse to
+    # start. OUTSIDE the uvicorn try so the RuntimeError aborts rather than being
+    # caught as a generic crash; runs BEFORE the ready-banner so a refused boot never
+    # prints "ready!".
+    try:
+        _auth.check_boot_preconditions(_bind_host)
+    except RuntimeError as e:
+        logger.error('[FATAL] %s', e)
+        raise SystemExit(1)
+
+    # Ready banner — reported only after the boot guard passed.
+    disp_host = '127.0.0.1' if _bind_host in ('0.0.0.0', '0.0.0.0:') else _bind_host
     logger.info('\n[OK] API Server ready!')
-    logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
-    logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
-    logger.info('    -> REST API at http://127.0.0.1:%d/api/', port)
+    logger.info('    -> Open http://%s:%d in your browser', disp_host, port)
+    logger.info('    -> WebSocket at ws://%s:%d/ws/chat', disp_host, port)
+    logger.info('    -> REST API at http://%s:%d/api/', disp_host, port)
     logger.info('=' * 50)
 
     # Set up graceful shutdown handler
@@ -3450,6 +3633,9 @@ if __name__ == '__main__':
     if os.name != 'nt':
         signal.signal(signal.SIGTERM, handle_shutdown)
 
+    # (BUG_0435 fail-closed boot guard already ran above, before the ready banner,
+    # and seeded AGENT_CASCADE_HOST so the gate and the bind share one host.)
+
     try:
         # Inlined base64 media (image/audio/video) rides inside a single WS text frame,
         # so uvicorn/websockets enforces the inbound frame ceiling BEFORE the message
@@ -3458,7 +3644,7 @@ if __name__ == '__main__':
         # default. The client caps each non-image attachment at 6 MiB raw (app.js
         # MAX_INLINE_MEDIA_BYTES); base64 inflates ~4/3 -> ~8 MiB inline, leaving ~2x
         # headroom against this 16 MiB frame limit. Keep the two values consistent.
-        uvicorn.run(app, host=args.host, port=port, ws_max_size=16 * 1024 * 1024)
+        uvicorn.run(app, host=_bind_host, port=port, ws_max_size=16 * 1024 * 1024)
     except OSError as e:
         if e.errno == 98 or 'address already in use' in str(e).lower():
             logger.error('[FATAL] Port %d is already in use. Use --port to specify a different port.', port)

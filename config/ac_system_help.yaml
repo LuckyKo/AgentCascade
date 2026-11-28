@@ -40,6 +40,7 @@ rest_api:
     - "Base URL is the Server Address shown in normal system_info output (e.g. http://127.0.0.1:8765)."
     - "Message injection (/api/message) requires an X25519 handshake first to obtain a session token."
   endpoints:
+    - {method: GET,    path: /api/health,               summary: "Liveness probe: 200 + {status: ok} (open route, no auth required)."}
     - {method: GET,    path: /api/keys,                 summary: "Return the server's X25519 public key (Base64) + algorithm."}
     - {method: POST,   path: /api/handshake,            summary: "Exchange client public key for a session_token (X25519 ECDH)."}
     - {method: POST,   path: /api/message,              summary: "Inject an AES-GCM-encrypted message into an agent's queue and start generation."}

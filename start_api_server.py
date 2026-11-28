@@ -359,8 +359,14 @@ if __name__ == '__main__':
 
     # Startup splash (ASCII banner with version + URL). Additive: runs after logging is
     # up so it also lands in console.log. Non-TTY / AGENT_CASCADE_NO_BANNER → one-liner.
+    # Resolve the bind host once, early, so the splash + [OK] banner both report the
+    # real interface in mesh mode (0.0.0.0 binds but is shown as 127.0.0.1). The
+    # fail-closed boot guard still runs immediately before the socket bind (below).
+    from agent_cascade import auth as _auth
+    _bind_host = _auth.effective_host()
+    disp_host = '127.0.0.1' if _bind_host in ('0.0.0.0', '0.0.0.0:') else _bind_host
     from agent_cascade.splash import print_startup_banner
-    print_startup_banner(mode='API Server', port=args.port, host='127.0.0.1')
+    print_startup_banner(mode='API Server', port=args.port, host=disp_host)
 
     # Make the hardcoded Tier-4 global default visible at startup. Emitted here
     # (after init_logging) so it actually reaches the configured handlers — logging a
@@ -430,9 +436,9 @@ if __name__ == '__main__':
 
     port = args.port
     logger.info('\n[OK] API Server ready!')
-    logger.info('    -> Open http://127.0.0.1:%d in your browser', port)
-    logger.info('    -> WebSocket at ws://127.0.0.1:%d/ws/chat', port)
-    logger.info('    -> REST API at http://127.0.0.1:%d/api/', port)
+    logger.info('    -> Open http://%s:%d in your browser', disp_host, port)
+    logger.info('    -> WebSocket at ws://%s:%d/ws/chat', disp_host, port)
+    logger.info('    -> REST API at http://%s:%d/api/', disp_host, port)
     logger.info('\n[TIP] Type in this terminal to inject messages into the active agent.')
     logger.info('=' * 50)
 
@@ -441,8 +447,19 @@ if __name__ == '__main__':
     # and turns an EADDRINUSE into an internal sys.exit(1) — so after a restart, while the
     # parent is still tearing down, the child dies with nothing left running. Pre-binding
     # here (and handing the socket to uvicorn below) makes every restart path robust.
+    # BUG_0435: bind interface from AGENT_CASCADE_HOST (loopback default) and the
+    # fail-closed boot check — parity with start_multi_agent. The guard runs BEFORE
+    # the socket-bind try so its RuntimeError is never swallowed as "port in use".
+    # _auth and _bind_host were resolved early (above the splash); enforce fail-closed
+    # now, immediately before the socket bind, so a non-loopback bind with no key can
+    # never be swallowed as a generic "port in use" error.
     try:
-        sock = _bind_socket_with_retry('127.0.0.1', port)
+        _auth.check_boot_preconditions(_bind_host)
+    except RuntimeError as e:
+        logger.error('[FATAL] %s', e)
+        raise SystemExit(1)
+    try:
+        sock = _bind_socket_with_retry(_bind_host, port)
     except Exception as e:
         logger.error('[FATAL] Port %d is already in use after ~%ds; another process may be holding it. '
                      'Use --port <PORT> or stop the other process. (%s)', port, 20 * 0.5, e)
@@ -451,9 +468,9 @@ if __name__ == '__main__':
 
     # Create server first so signal handler can reference it. host/port are still passed to
     # Config for logging/messages; uvicorn skips its own bind because we pass sockets=[sock].
-    config = uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning')
+    config = uvicorn.Config(app, host=_bind_host, port=port, log_level='warning')
     server = uvicorn.Server(config)
-    agent_pool.server_info = ('127.0.0.1', port)
+    agent_pool.server_info = (_bind_host, port)
 
     # Use shared signal handler from shared_init (Phase 5B — deduplicated shutdown logic)
     from agent_cascade.shared_init import setup_signal_handler

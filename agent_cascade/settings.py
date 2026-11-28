@@ -419,6 +419,28 @@ UNTRUSTED_TOOL_OUTPUT_TAG: str = 'untrusted_tool_output'
 # AGENT_CASCADE_MEMORY_VAULT_WRITE_SCREEN=0.
 MEMORY_VAULT_WRITE_SCREEN: bool = os.getenv('AGENT_CASCADE_MEMORY_VAULT_WRITE_SCREEN', '1') == '1'
 
+# ── Secure remote control (BUG_0435) — auth / audit / rate config ──────────────
+# Deployment-level controls for secure remote control of the AC server. Env-only,
+# NEVER persisted to pool_settings.json (they are secrets + deployment topology;
+# must not round-trip through the WebUI settings save or appear in GET /api/settings).
+# The SECRET credentials and the bind host are read live in agent_cascade/auth.py at
+# request time (so tests can flip enforcement via monkeypatch.setenv without a reload):
+#   AGENT_CASCADE_HOST (default 127.0.0.1 — loopback-first; replaces old hard-coded 0.0.0.0)
+#   AGENT_CASCADE_ADMIN_API_KEY   (controller REST key; unset => inert on loopback)
+#   AGENT_CASCADE_VIEWER_API_KEYS (comma-separated read-only keys; unset => none)
+# NOTE these are distinct from AGENT_CASCADE_API_KEY, which is the LLM *provider* key
+# (api_server.py __main__) and must never be conflated with server auth.
+# Operational knobs below are env-at-import constants (house pattern), read once.
+AUDIT_ENABLED: bool = os.getenv('AGENT_CASCADE_AUDIT_ENABLED', '1') == '1'
+AUDIT_RETENTION_DAYS: int = int(os.getenv('AGENT_CASCADE_AUDIT_RETENTION_DAYS', '30'))
+RATE_LIMIT_MUTATING_PER_MIN: int = int(os.getenv('AGENT_CASCADE_RATE_LIMIT_MUTATING_PER_MIN', '30'))
+RATE_LIMIT_HANDSHAKE_PER_MIN: int = int(os.getenv('AGENT_CASCADE_RATE_LIMIT_HANDSHAKE_PER_MIN', '10'))
+RATE_LIMIT_APPROVE_PER_MIN: int = int(os.getenv('AGENT_CASCADE_RATE_LIMIT_APPROVE_PER_MIN', '60'))
+RATE_LIMIT_SLOWROUTE_PER_MIN: int = int(os.getenv('AGENT_CASCADE_RATE_LIMIT_SLOWROUTE_PER_MIN', '10'))
+# (No TRUST_PROXY constant here on purpose: auth.trust_proxy_enabled() reads
+# AGENT_CASCADE_TRUST_PROXY live at call time so tests/ops can flip it without
+# re-import. An import-time copy here would be a misleading dead duplicate.)
+
 
 def _resolve_default_workspace() -> str:
     """Resolve DEFAULT_WORKSPACE at import time.
