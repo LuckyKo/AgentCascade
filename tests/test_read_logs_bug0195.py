@@ -8,8 +8,7 @@ blank lines (or non-entry prose) existed. The fix:
   - every JSONL/mixed entry records its physical 1-based file line;
   - simple mode shows both coordinates (``⟨E <entry> | L <line>⟩``);
   - raw mode prefixes ``L<line>:`` (or ``E<entry>:`` when no mapping exists);
-  - the header says ``entries`` and appends ``file lines A-B``;
-  - ``by_line=true`` interprets ``range`` as physical file lines.
+  - the header says ``entries`` and appends ``file lines A-B``.
 
 Run: python -m pytest tests/test_read_logs_bug0195.py -v -p no:xdist -o addopts=""
 """
@@ -83,50 +82,6 @@ def test_raw_prefix_uses_physical_file_line():
         assert body[2].startswith('L5: '), body
         # The physical prefix matches the actual source line.
         assert json.loads(body[1].split(': ', 1)[1])['content'] == 'first'
-
-
-def test_by_line_selects_physical_lines_not_entry_indices():
-    with tempfile.TemporaryDirectory() as tmp:
-        p = _write(Path(tmp), 'mixed.md', MIXED)
-        # File line 5 holds entry 3 ("second"); it must not be read as entry 5
-        # (which does not exist) or as entry 5's neighbourhood.
-        result = _read(p, format='simple', range='5:5', by_line=True)
-
-        assert 'second' in result, result
-        assert 'first' not in result, result
-        header = result.split('\n')[0]
-        assert 'entries 3-3/3' in header, header
-        assert 'file lines 5-5' in header, header
-
-
-def test_by_line_range_covers_multiple_physical_lines():
-    with tempfile.TemporaryDirectory() as tmp:
-        p = _write(Path(tmp), 'mixed.md', MIXED)
-        result = _read(p, format='simple', range='3:5', by_line=True)
-
-        assert 'first' in result, result
-        assert 'second' in result, result
-        assert 'Todo' not in result, result
-        header = result.split('\n')[0]
-        assert 'entries 2-3/3' in header, header
-
-
-def test_by_line_requires_explicit_range():
-    with tempfile.TemporaryDirectory() as tmp:
-        p = _write(Path(tmp), 'mixed.md', MIXED)
-        result = _read(p, format='simple', by_line=True)
-        assert result.startswith('Error'), result
-        assert 'requires an explicit' in result, result
-
-
-def test_by_line_rejected_for_json_array_without_line_mapping():
-    with tempfile.TemporaryDirectory() as tmp:
-        p = _write(Path(tmp), 'array.json',
-                   json.dumps([{'role': 'user', 'content': 'a'},
-                               {'role': 'user', 'content': 'b'}]))
-        result = _read(p, format='simple', range='1:2', by_line=True)
-        assert result.startswith('Error'), result
-        assert 'JSON array' in result, result
 
 
 def test_json_array_header_omits_file_lines_and_uses_entry_prefix():

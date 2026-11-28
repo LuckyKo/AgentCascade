@@ -58,18 +58,9 @@ class TestReadLogsFilter:
             assert 'CONTEXT COMPRESSED' in result      # the matched entry is shown
             assert 'bye' not in result                 # non-matching entries are not
 
-    def test_case_sensitive_filter_excludes_other_case(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': MARKER}])
-
-            result = _read(p, filter='context compressed', filter_case_sensitive=True)
-
-            assert 'matches 0 of 1 entries' in result, result
-            assert 'CONTEXT COMPRESSED' not in result
-            assert '```' not in result, 'an empty match set must not emit a body fence'
-
     def test_literal_filter_does_not_interpret_regex_metacharacters(self):
-        """'a.b' as a literal matches only 'a.b'; as a regex it also matches 'axb'."""
+        """'a.b' has no trigger metacharacter -> literal (matches only 'a.b').
+        'a.*b' has a '*' -> auto-run as a case-insensitive regex (also matches 'axb')."""
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_jsonl(Path(tmp), 't.jsonl', [
                 {'role': 'user', 'content': 'axb'},
@@ -80,29 +71,29 @@ class TestReadLogsFilter:
             assert 'matches 1-1/1 of 2 entries' in literal.split('\n')[0]
             assert 'axb' not in literal
 
-            as_regex = _read(p, filter='a.b', filter_regex=True)
+            as_regex = _read(p, filter='a.*b')
             assert 'matches 1-2/2 of 2 entries' in as_regex.split('\n')[0]
             assert 'axb' in as_regex
 
-    def test_regex_filter_is_case_insensitive_unless_asked_otherwise(self):
+    def test_regex_filter_is_case_insensitive(self):
+        """A backslashed pattern auto-detects as a regex and matches case-insensitively."""
         with tempfile.TemporaryDirectory() as tmp:
             p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': MARKER}])
 
-            insensitive = _read(p, filter=r'context\s+compressed', filter_regex=True)
-            assert 'matches 1-1/1 of 1 entries' in insensitive.split('\n')[0]
+            result = _read(p, filter=r'context\s+compressed')
+            assert 'matches 1-1/1 of 1 entries' in result.split('\n')[0]
 
-            sensitive = _read(p, filter=r'context\s+compressed', filter_regex=True,
-                              filter_case_sensitive=True)
-            assert 'matches 0 of 1 entries' in sensitive
-
-    def test_invalid_regex_returns_actionable_error(self):
+    def test_invalid_auto_detected_regex_falls_back_to_literal(self):
+        """'(' triggers regex detection but is an invalid regex -> degrade to literal, never error."""
         with tempfile.TemporaryDirectory() as tmp:
-            p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': 'x'}])
+            p = _write_jsonl(Path(tmp), 't.jsonl', [
+                {'role': 'user', 'content': 'a(b'},
+                {'role': 'user', 'content': 'plain'},
+            ])
 
-            result = _read(p, filter='(', filter_regex=True)
-
-            assert result.startswith('ERROR: invalid filter regex'), result
-            assert 'filter_regex=false' in result
+            result = _read(p, filter='(')
+            assert not result.startswith('ERROR'), result
+            assert 'matches 1-1/1 of 2 entries' in result
 
     def test_filter_matches_text_hidden_by_preview_truncation(self):
         """Matching is done on the full entry, not the truncated simple preview."""
@@ -172,30 +163,3 @@ class TestReadLogsFilter:
             header = result.split('\n')[0]
             assert 'entries 1-2/2' in header, header
             assert 'filter' not in header, 'an empty filter must not change the header'
-
-    def test_by_line_window_scopes_the_filter(self):
-        """by_line is a hard window; the filter narrows it and the header cites the window."""
-        with tempfile.TemporaryDirectory() as tmp:
-            entries = [{'role': 'user',
-                        'content': f"m{i}" + (' MARK' if i in (3, 5) else '')}
-                       for i in range(1, 11)]
-            p = _write_jsonl(Path(tmp), 't.jsonl', entries)
-
-            result = _read(p, format='raw', by_line=True, range='3:5', filter='MARK')
-
-            header = result.split('\n')[0]
-            assert 'matches 1-2/2 in file lines 3-5' in header, header
-            assert "filter 'MARK'" in header
-            body = _fenced_body(result)
-            assert len(body) == 2
-            assert [line.split(':')[0] for line in body] == ['L3', 'L5']
-
-    def test_by_line_window_with_no_match(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_jsonl(Path(tmp), 't.jsonl', [{'role': 'user', 'content': f"m{i}"}
-                                                    for i in range(1, 6)])
-
-            result = _read(p, by_line=True, range='2:4', filter='MARK')
-
-            assert 'matches 0 in file lines 2-4' in result, result
-            assert '```' not in result

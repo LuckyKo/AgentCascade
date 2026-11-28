@@ -52,24 +52,9 @@ class ReadLogs(BaseTool):
                 'default': 'simple',
                 'description': TOOL_METADATA['read_logs']['parameters']['format']
             },
-            'by_line': {
-                'type': 'boolean',
-                'default': False,
-                'description': TOOL_METADATA['read_logs']['parameters']['by_line']
-            },
             'filter': {
                 'type': 'string',
                 'description': TOOL_METADATA['read_logs']['parameters']['filter']
-            },
-            'filter_regex': {
-                'type': 'boolean',
-                'default': False,
-                'description': TOOL_METADATA['read_logs']['parameters']['filter_regex']
-            },
-            'filter_case_sensitive': {
-                'type': 'boolean',
-                'default': False,
-                'description': TOOL_METADATA['read_logs']['parameters']['filter_case_sensitive']
             }
         },
         required=['log_file'],
@@ -211,6 +196,18 @@ class ReadLogs(BaseTool):
             return lambda item: pattern in cls._entry_match_text(item)
         needle = pattern.casefold()
         return lambda item: needle in cls._entry_match_text(item).casefold()
+
+    # Metacharacters that signal a `filter` is intended as a regex. Deliberately excludes a
+    # lone '.' (filenames like main.py) so plain-text searches stay literal; a '*' (wildcard /
+    # '.*') is a strong regex signal and is included.
+    _REGEX_TRIGGER = frozenset('|()[]^$\\*')
+
+    @classmethod
+    def _filter_looks_like_regex(cls, pattern: str) -> bool:
+        """Auto-detect regex intent for `filter`. True only if the text contains a metacharacter
+        that is rare in literal log searches (alternation, groups, char classes, anchors,
+        escapes, wildcards). Plain identifiers / filenames (a lone '.') stay literal."""
+        return any(ch in cls._REGEX_TRIGGER for ch in pattern)
 
     @staticmethod
     def _humanize_size(file_path: Path) -> str:
@@ -578,13 +575,21 @@ class ReadLogs(BaseTool):
         matcher = None
         filter_label = ''
         if filter_pattern is not None:
-            use_regex = self._as_bool(params.get('filter_regex', False))
+            case_sensitive = self._as_bool(params.get('filter_case_sensitive', False))
+            use_regex = self._as_bool(params.get('filter_regex', False))  # explicit override (not in schema)
+            auto_regex = False
+            if not use_regex and self._filter_looks_like_regex(filter_pattern):
+                use_regex = True
+                auto_regex = True
             try:
-                matcher = self._build_filter_matcher(
-                    filter_pattern, use_regex,
-                    self._as_bool(params.get('filter_case_sensitive', False)))
+                matcher = self._build_filter_matcher(filter_pattern, use_regex, case_sensitive)
             except ValueError as e:
-                return f"ERROR: {e}"
+                if auto_regex:
+                    # Auto-detected regex that failed to compile -> degrade to literal, never error.
+                    use_regex = False
+                    matcher = self._build_filter_matcher(filter_pattern, False, case_sensitive)
+                else:
+                    return f"ERROR: {e}"
             filter_label = f'/{filter_pattern}/' if use_regex else f"'{filter_pattern}'"
 
         match_total = None  # number of entries matching the filter (None = no filter)

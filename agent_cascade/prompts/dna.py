@@ -805,23 +805,17 @@ TOOL_METADATA = {
         ),
         'parameters': {
             'log_file':
-                'The path to the log file, absolute or relative to the workspace root (e.g., "logs/orchestrator_main.jsonl"). Works with JSON arrays, single objects, and JSONL files.',
+                'Path to the log file, absolute or relative to the workspace root. Works with JSON arrays, single objects, and JSONL files.',
             'max_chars_per_message':
-                'Maximum characters to keep for each string value in messages. Default: 1000.',
+                'Max characters to keep per string value in messages. Default: 1000.',
             'range':
-                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry), same in ranges and as single values. Omit to default to the last 20 entries — or, when `filter` is set, to the last 20 MATCHES. Entry index is NOT the physical file line — the output shows both (entry index and `L <file line>`) when they differ. Pass by_line=true to interpret this range as physical file lines instead.',
+                'Entry range to read, 1-based inclusive (e.g., "1:10", "5:", ":20"). Negative indices count from the end (-1 = last entry). Omit to default to the last 20 entries — or, when `filter` is set, to the last 20 MATCHES. Entry index is NOT the physical file line; the output shows both when they differ.',
             'mode':
-                'Display mode controlling truncation behavior. Options: "trim_tools" (default, truncate only tool OUTPUTS — the content of role="function"/"tool" entries — while leaving assistant tool calls (function_call.arguments / tool_calls arguments) intact), "trim_all" (truncate all string values as in legacy behavior), "none" (no truncation at all).',
+                'Display mode. "trim_tools" (default) truncates only tool OUTPUTS, leaving assistant tool-call arguments intact; "trim_all" truncates all string values; "none" no truncation.',
             'format':
-                'Output format. "simple" (default) shows a human-readable summary with timestamps, role labels, and tool info; "raw" shows the original JSON lines for precise parsing. In raw mode each line is prefixed with its physical file line (`L<n>:`) or, when no line mapping exists, its entry index (`E<n>:`).',
-            'by_line':
-                'When true, interpret `range` as physical file line numbers (1-based inclusive) instead of entry indices, e.g. range="181:259" reads every log entry whose source line falls in 181-259. Requires an explicit range; not supported for whole-file JSON arrays (which have no per-entry line mapping). When `filter` is also set, only matching entries inside that line window are shown.',
+                'Output format. "simple" (default) = human-readable summary with timestamps, roles, tool info; "raw" = original JSON lines for precise parsing (each prefixed with its file line `L<n>:` or entry index `E<n>:`).',
             'filter':
-                'Keep only entries containing this text. The match runs over the WHOLE entry — role, content, tool-call arguments, reasoning — before any truncation, so it also finds text that the short simple preview cuts out. Defaults to a literal, case-insensitive substring match. While a filter is active, `range` counts MATCHES (not all entries) and the header reports `matches first-last/<total matches> of <total entries>`; every shown line still carries its real entry index and file line, so the omitted entries remain reachable by re-reading without the filter. Example: filter="--- CONTEXT COMPRESSED" lists every compaction marker in a huge log. Omit or leave empty for no filtering.',
-            'filter_regex':
-                'When true, treat `filter` as a Python regex instead of a literal substring (e.g. "CONTEXT COMPRESSED|role.*tool"). Case-insensitivity still follows filter_case_sensitive. An invalid pattern returns an error naming the problem instead of raising.',
-            'filter_case_sensitive':
-                'When true, `filter` matching is case-sensitive. Default false (case-insensitive), so "error" finds "ERROR".'
+                'Keep only entries containing this text, matched over the WHOLE entry (role, content, tool-call args, reasoning) before truncation. Literal, case-insensitive substring by default; if the text contains regex metacharacters (| ( ) [ ] ^ $ * \\) it is auto-run as a case-insensitive regex (an invalid pattern falls back to literal). While active, `range` counts MATCHES and the header reports `first-last/total`. Omit for no filtering. Example: filter="CONTEXT COMPRESSED|role.*tool".'
         }
     },
     'image_gen': {
