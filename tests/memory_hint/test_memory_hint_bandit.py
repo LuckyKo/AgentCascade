@@ -44,7 +44,10 @@ class _StubMatcher:
     def __init__(self, matches):
         self._matches = list(matches)          # [(path, score)] score-descending
 
-    def match(self, query):
+    def match(self, query, allowed_scope=None, recency=None, importance=None, weights=None):
+        # Accept the production matcher's recall-scoring kwargs (BUG_0428) so the stub
+        # stays signature-compatible with memory_hint/matcher.py::match(); the stub
+        # ignores them and returns the caller-supplied list verbatim.
         return list(self._matches)
 
     def set_documents(self, documents):        # called by rescan_vaults — keep it harmless
