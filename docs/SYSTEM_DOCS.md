@@ -49,6 +49,8 @@ Agent Cascade eliminates this duality entirely. Every agent — including the or
 | **Halt/Resume/Terminate** | Any agent instance can be paused or resumed at any time from the UI. Agents also auto-dismiss after a configurable idle period to keep the pool clean |
 | **Security Review** | Sensitive tool calls (shell commands, file writes) trigger a Security Advisor agent that analyzes the request and approves or rejects it before execution proceeds |
 | **Skill System** | Reusable cross-project procedures (`SKILL.md`) are discovered, auto-loaded into context, evolved via `propose_skill`, and **automatically invalidated/rebalanced** — low-quality or stale skills are auto-retired, so an agent never accumulates dead expertise. See §10 |
+| **Media Generation** | A `media_gen` tool drives image / video / audio generation through pluggable backends (Stable Diffusion, ComfyUI, TTS), configured via the `/api/media_gen*` and `/api/image_gen*` REST surface and a WebUI settings tab. See §3.4 |
+| **Secure Remote Control** | The REST/WebSocket surface is loopback-only by default and gated by an API-key auth gate (`agent_cascade/auth.py`) when exposed; a non-loopback bind without a key refuses to boot (fail-closed). See §3.4 |
 
 ---
 
@@ -256,6 +258,20 @@ The API Server also owns the MCP (Model Context Protocol) server configuration �
 `config/mcp_servers.json` is the single source of truth for the `enabled` flag; live connection state is read separately from `MCPManager` under its lock.
 
 **WebUI:** an on-demand settings tab, `sub-mcp-config`, that edits `config/mcp_servers.json`. It is **not** part of the normal sub-agent tab set — it is opened only when the user clicks the "Open MCP Config" button, and is deliberately excluded from sub-agent tab cleanup so it is never auto-closed.
+
+#### Network Security & Auth Gate
+
+The API server binds to **loopback (`127.0.0.1`) by default**, and its REST/WebSocket surface is
+protected by a global auth-gate middleware (`agent_cascade/auth.py`) with an append-only audit
+log (`agent_cascade/audit.py`). The gate is **inert by default**: a loopback bind with no key
+configured behaves exactly as before (local WebUI / Telegram control, no client change). When the
+server is exposed beyond loopback — a mesh/proxy bind via `AGENT_CASCADE_HOST` **or** a key is set —
+the gate is **enforced**: mutating routes require an admin key (`AGENT_CASCADE_ADMIN_API_KEY`),
+read-only dashboards can use a viewer key (`AGENT_CASCADE_VIEWER_API_KEYS`), and a non-loopback
+bind with **no** key **refuses to boot** (fail-closed). Credentials travel via the `X-API-Key`
+header (or `Authorization: Bearer` / `?api_key=`). This makes remote control *authenticated +
+audited*, not safe-by-default; the design is transport-agnostic (WireGuard / Tailscale / reverse
+proxy / SSH tunnel — only the runbook differs). See `docs/secure-remote-control.md`.
 
 ### 3.5 API Router
 
@@ -1131,6 +1147,15 @@ When a real human decision is pending, the system pushes a fire-and-forget notif
 Sub-agent approvals **do** push: a sub-agent's approval is still a real user decision. There is no dedup (approvals are unique events), and the `request_id` is embedded in the message body because the bridge's `instance_name` is log-only. A bridge failure never breaks the approval flow (guarded with a `hasattr` check + `try/except`).
 
 **Auto-Ask Security:** when enabled, the Security Advisor vets each pending approval and auto-applies a verdict, so no human prompt is surfaced and no Telegram push is sent. The `/api/auto_security` control endpoint toggles this.
+
+**Defense-in-depth hardening (beyond the approval flow):** the tool layer also enforces a
+trust-wrap default (untrusted tool output is wrapped and its tools restricted), an SSRF egress
+guard (`agent_cascade/utils/ssrf_guard.py`) that fail-closes and re-validates every redirect hop,
+a restricted-agent network denial (agents in restricted mode get no network egress), an
+untrusted-content tool disable (an agent that ingested untrusted content cannot call network
+tools), and reviewer/admin read-only floors (a Reviewer or Admin agent can never drop below the
+admin tool floor). These complement the external auth gate in §3.4, which secures the
+REST/WebSocket surface itself.
 
 ### 5.8 System Notification Queues
 
